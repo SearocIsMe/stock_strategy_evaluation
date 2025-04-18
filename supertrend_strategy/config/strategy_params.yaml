@@ -1,0 +1,65 @@
+# A股量化交易策略参数配置文件
+
+# 数据获取参数
+data:
+  tushare_token: "a56e2085d63e65ca75096d2b1e014fb7e767abb40fa4a6f9a1416e39"  # 替换为您的Tushare API token
+  start_date: "2020-01-01"  # 回测开始日期
+  end_date: "2023-12-31"    # 回测结束日期
+  universe: "A"             # 股票池: A=所有A股
+
+# 资金管理参数
+capital:
+  initial: 1000000          # 初始资金(元)
+  max_positions: 10         # 最大持仓数量
+  position_sizing: "equal"  # 仓位分配方式: equal=等权, dynamic=动态
+
+# Supertrend参数
+supertrend:
+  st1:
+    factor: 3
+    period: 12
+  st2:
+    factor: 1
+    period: 10
+  st3:
+    factor: 2
+    period: 11
+
+# EMA参数
+ema:
+  length: 144               # EMA周期
+
+# Ichimoku云层参数
+ichimoku:
+  conversion_periods: 9     # 转折线周期
+  base_periods: 26          # 基准线周期
+  lagging_span_periods: 52  # 延迟跨度周期
+
+# 周线均线参数
+weekly_ma:
+  ma1_period: 13            # 13周均线周期
+  ma2_period: 34            # 34周均线周期
+
+# 量能参数
+volume:
+  multiplier: 1.8           # 放量倍数
+  turnover_threshold: 3.0   # 最低换手率(%)
+  ma_period: 20             # 成交量均线周期
+
+# 筹码集中度参数
+chip_concentration:
+  threshold: 50             # 筹码集中度阈值(%)
+
+# 止盈止损参数
+exit:
+  take_profit: 20           # 止盈百分比(%)
+  stop_loss: 10             # 止损百分比(%)
+
+# RSI超买过滤参数
+rsi:
+  period: 14                # RSI周期
+  overbought: 70            # 超买阈值
+
+# 回测评估参数
+evaluation:
+  benchmark: "000300.SH"    # 基准指数: 沪深300
