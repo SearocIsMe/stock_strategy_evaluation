@@ -110,6 +110,30 @@ class SignalGenerator:
         logger.info(f"  - 买入信号: {stocks_with_buy_signal} 只")
         logger.info(f"  - 卖出信号: {stocks_with_sell_signal} 只")
         
+        # 打印评分最高的前10只股票
+        if signals:
+            top_stocks = sorted(signals.items(), key=lambda x: x[1]['score'] if 'score' in x[1] else 0, reverse=True)[:10]
+            logger.info(f"评分最高的前10只股票:")
+            for i, (ts_code, data) in enumerate(top_stocks, 1):
+                # 基本信息
+                log_msg = f"  {i}. {ts_code}: 评分={data['score']:.2f}, 买入信号={data['buy_signal']}, 卖出信号={data['sell_signal']}"
+                
+                # 添加详细指标信息
+                indicators = [
+                    f"RSI={data['rsi']:.2f}" if data['rsi'] is not None else "RSI=N/A",
+                    f"上升趋势={data['all_uptrend']}" if data['all_uptrend'] is not None else "上升趋势=N/A",
+                    f"价格>EMA={data['price_above_ema']}" if data['price_above_ema'] is not None else "价格>EMA=N/A",
+                    f"价格>云层={data['price_above_cloud']}" if data['price_above_cloud'] is not None else "价格>云层=N/A",
+                    f"周线条件={data['weekly_condition']}" if data['weekly_condition'] is not None else "周线条件=N/A",
+                    f"成交量信号={data['volume_signal']}" if data['volume_signal'] is not None else "成交量信号=N/A",
+                    f"换手率信号={data['turnover_signal']}" if data['turnover_signal'] is not None else "换手率信号=N/A",
+                    f"筹码集中={data['cost_valid']}" if data['cost_valid'] is not None else "筹码集中=N/A"
+                ]
+                
+                # 添加指标信息到日志
+                log_msg += "\n    " + ", ".join(indicators)
+                logger.info(log_msg)
+        
         return signals
     
     def _generate_buy_signal(self, df: pd.DataFrame, idx: int) -> int:

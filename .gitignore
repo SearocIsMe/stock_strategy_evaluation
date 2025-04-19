@@ -25,6 +25,8 @@ gateway/
 venv/
 env/
 ENV/
+results/
+.venv/
 
 # IDE
 .idea/

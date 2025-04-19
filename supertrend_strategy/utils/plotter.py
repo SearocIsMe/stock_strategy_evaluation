@@ -33,12 +33,90 @@ logger = logging.getLogger('Plotter')
 if is_wsl:
     logger.info("Detected WSL environment, using non-GUI 'Agg' backend for matplotlib")
 
+# 检查字体是否能渲染特定的中文字符
+def check_font_for_chinese(font_name):
+    try:
+        from matplotlib.font_manager import FontProperties
+        import matplotlib.pyplot as plt
+        from matplotlib.backends.backend_agg import FigureCanvasAgg
+        
+        # 测试字符，包括常见的中文字符和特定的"投"字和"撤"字
+        test_chars = "中文测试投资撤回"
+        
+        # 创建一个临时图形来测试字体
+        fig = plt.figure(figsize=(1, 1))
+        canvas = FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111)
+        
+        # 尝试使用指定字体渲染文本
+        font_prop = FontProperties(family=font_name)
+        ax.text(0.5, 0.5, test_chars, fontproperties=font_prop)
+        
+        # 渲染图形到内存
+        canvas.draw()
+        
+        # 如果没有抛出异常，则认为字体可以渲染中文
+        plt.close(fig)
+        return True
+    except Exception:
+        return False
+
 # 设置中文字体支持
 try:
-    plt.rcParams['font.sans-serif'] = ['SimHei']  # 用来正常显示中文标签
+    # 尝试多种支持中文的字体，按优先级排序
+    cjk_fonts = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 'Noto Sans CJK SC', 'Noto Sans CJK JP',
+                 'Droid Sans Fallback', 'Arial Unicode MS', 'DejaVu Sans']
+    
+    # 检查matplotlib可用的字体
+    from matplotlib.font_manager import fontManager, FontProperties
+    available_fonts = [f.name for f in fontManager.ttflist]
+    
+    # 找到第一个可用的CJK字体
+    font_found = False
+    for font in cjk_fonts:
+        if font in available_fonts and check_font_for_chinese(font):
+            plt.rcParams['font.sans-serif'] = [font] + plt.rcParams['font.sans-serif']
+            font_found = True
+            logger.info(f"使用字体 '{font}' 显示中文字符")
+            break
+    
+    # 默认使用英文标签，除非明确找到了支持所有测试字符的中文字体
+    USE_ENGLISH_LABELS = True
+    
+    if font_found:
+        # 即使找到了字体，也进行额外测试确保它能渲染所有需要的字符
+        try:
+            # 创建一个临时图形来测试更多字符
+            fig = plt.figure(figsize=(1, 1))
+            ax = fig.add_subplot(111)
+            
+            # 测试更多可能出现的中文字符
+            test_text = "投资回撤分析交易策略收益率"
+            font_prop = FontProperties(family=plt.rcParams['font.sans-serif'][0])
+            ax.text(0.5, 0.5, test_text, fontproperties=font_prop)
+            
+            # 渲染到内存
+            fig.canvas.draw()
+            plt.close(fig)
+            
+            # 如果没有抛出异常，可以使用中文标签
+            USE_ENGLISH_LABELS = False
+            logger.info("中文字体测试通过，将使用中文标签")
+        except Exception as e:
+            logger.warning(f"中文字体测试失败: {e}，将使用英文标签")
+    else:
+        # 如果没有找到理想的字体，尝试使用系统默认字体
+        plt.rcParams['font.sans-serif'] = ['sans-serif']
+        logger.warning("未找到支持中文的字体，将使用英文标签")
+    
     plt.rcParams['axes.unicode_minus'] = False    # 用来正常显示负号
-except:
-    logger.warning("无法设置中文字体，图表中的中文可能无法正常显示")
+    
+    # 额外设置，确保字体可以正确渲染
+    plt.rcParams['font.family'] = 'sans-serif'
+    
+except Exception as e:
+    logger.warning(f"设置中文字体时出错: {e}，将使用英文标签")
+    USE_ENGLISH_LABELS = True
 
 class Plotter:
     """
@@ -102,8 +180,15 @@ class Plotter:
         
         # 添加标题和标签
         ax.set_title(title, fontsize=15)
-        ax.set_xlabel('日期', fontsize=12)
-        ax.set_ylabel('价值', fontsize=12)
+        
+        # 根据字体支持情况选择中文或英文标签
+        if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+            ax.set_xlabel('Date', fontsize=12)
+            ax.set_ylabel('Value', fontsize=12)
+        else:
+            ax.set_xlabel('日期', fontsize=12)
+            ax.set_ylabel('价值', fontsize=12)
+            
         ax.legend(fontsize=12)
         
         # 添加收益率标注
@@ -116,15 +201,27 @@ class Plotter:
             benchmark_final = daily_performance['benchmark_value'].iloc[-1]
             benchmark_return = (benchmark_final / benchmark_initial - 1) * 100
             
-            ax.annotate(f'策略收益率: {total_return:.2f}%', 
-                      xy=(0.02, 0.95), xycoords='axes fraction', 
-                      fontsize=12, color=self.colors[0])
-            ax.annotate(f'基准收益率: {benchmark_return:.2f}%', 
-                      xy=(0.02, 0.90), xycoords='axes fraction', 
-                      fontsize=12, color=self.colors[1])
-            ax.annotate(f'超额收益: {total_return - benchmark_return:.2f}%', 
-                      xy=(0.02, 0.85), xycoords='axes fraction', 
-                      fontsize=12, color='green' if total_return > benchmark_return else 'red')
+            # 根据字体支持情况选择中文或英文标签
+            if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+                ax.annotate(f'Strategy Return: {total_return:.2f}%',
+                          xy=(0.02, 0.95), xycoords='axes fraction',
+                          fontsize=12, color=self.colors[0])
+                ax.annotate(f'Benchmark Return: {benchmark_return:.2f}%',
+                          xy=(0.02, 0.90), xycoords='axes fraction',
+                          fontsize=12, color=self.colors[1])
+                ax.annotate(f'Excess Return: {total_return - benchmark_return:.2f}%',
+                          xy=(0.02, 0.85), xycoords='axes fraction',
+                          fontsize=12, color='green' if total_return > benchmark_return else 'red')
+            else:
+                ax.annotate(f'策略收益率: {total_return:.2f}%',
+                          xy=(0.02, 0.95), xycoords='axes fraction',
+                          fontsize=12, color=self.colors[0])
+                ax.annotate(f'基准收益率: {benchmark_return:.2f}%',
+                          xy=(0.02, 0.90), xycoords='axes fraction',
+                          fontsize=12, color=self.colors[1])
+                ax.annotate(f'超额收益: {total_return - benchmark_return:.2f}%',
+                          xy=(0.02, 0.85), xycoords='axes fraction',
+                          fontsize=12, color='green' if total_return > benchmark_return else 'red')
         
         # 调整布局
         plt.tight_layout()
@@ -132,12 +229,15 @@ class Plotter:
         # 保存图表
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"投资组合表现图已保存至: {save_path}")
+            if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+                logger.info(f"Portfolio performance chart saved to: {save_path}")
+            else:
+                logger.info(f"投资组合表现图已保存至: {save_path}")
         
         return fig
     
-    def plot_drawdown(self, daily_performance: pd.DataFrame, 
-                    title: str = '回撤分析', 
+    def plot_drawdown(self, daily_performance: pd.DataFrame,
+                    title: str = None,
                     save_path: str = None) -> plt.Figure:
         """
         绘制回撤图
@@ -150,8 +250,19 @@ class Plotter:
         Returns:
             matplotlib Figure对象
         """
+        # 根据字体支持情况选择中文或英文标题和警告
+        if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+            default_title = 'Drawdown Analysis'
+            empty_data_warning = "Cannot plot drawdown: data is empty"
+        else:
+            default_title = '回撤分析'
+            empty_data_warning = "无法绘制回撤图：数据为空"
+            
+        # 使用提供的标题或默认标题
+        title = title or default_title
+            
         if daily_performance.empty:
-            logger.warning("无法绘制回撤图：数据为空")
+            logger.warning(empty_data_warning)
             return None
         
         # 转换日期格式
@@ -171,15 +282,31 @@ class Plotter:
         # 创建图表
         fig, ax = plt.subplots(figsize=(12, 6))
         
+        # 根据字体支持情况选择中文或英文标签
+        if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+            strategy_label = 'Strategy Drawdown'
+            benchmark_label = 'Benchmark Drawdown'
+            x_label = 'Date'
+            y_label = 'Drawdown (%)'
+            strategy_max_dd_label = f'Strategy Max Drawdown: {portfolio_drawdown.min():.2f}%'
+            benchmark_max_dd_label = f'Benchmark Max Drawdown: {benchmark_drawdown.min():.2f}%'
+        else:
+            strategy_label = '策略回撤'
+            benchmark_label = '基准回撤'
+            x_label = '日期'
+            y_label = '回撤 (%)'
+            strategy_max_dd_label = f'策略最大回撤: {portfolio_drawdown.min():.2f}%'
+            benchmark_max_dd_label = f'基准最大回撤: {benchmark_drawdown.min():.2f}%'
+            
         # 绘制回撤
-        ax.fill_between(daily_performance['date'], 0, portfolio_drawdown, 
-                      color=self.colors[0], alpha=0.3, label='策略回撤')
-        ax.plot(daily_performance['date'], portfolio_drawdown, 
+        ax.fill_between(daily_performance['date'], 0, portfolio_drawdown,
+                      color=self.colors[0], alpha=0.3, label=strategy_label)
+        ax.plot(daily_performance['date'], portfolio_drawdown,
                color=self.colors[0], linewidth=1)
         
-        ax.fill_between(daily_performance['date'], 0, benchmark_drawdown, 
-                      color=self.colors[1], alpha=0.3, label='基准回撤')
-        ax.plot(daily_performance['date'], benchmark_drawdown, 
+        ax.fill_between(daily_performance['date'], 0, benchmark_drawdown,
+                      color=self.colors[1], alpha=0.3, label=benchmark_label)
+        ax.plot(daily_performance['date'], benchmark_drawdown,
                color=self.colors[1], linewidth=1)
         
         # 设置x轴格式
@@ -192,19 +319,19 @@ class Plotter:
         
         # 添加标题和标签
         ax.set_title(title, fontsize=15)
-        ax.set_xlabel('日期', fontsize=12)
-        ax.set_ylabel('回撤 (%)', fontsize=12)
+        ax.set_xlabel(x_label, fontsize=12)
+        ax.set_ylabel(y_label, fontsize=12)
         ax.legend(fontsize=12)
         
         # 添加最大回撤标注
         max_drawdown = portfolio_drawdown.min()
         benchmark_max_drawdown = benchmark_drawdown.min()
         
-        ax.annotate(f'策略最大回撤: {max_drawdown:.2f}%', 
-                  xy=(0.02, 0.15), xycoords='axes fraction', 
+        ax.annotate(strategy_max_dd_label,
+                  xy=(0.02, 0.15), xycoords='axes fraction',
                   fontsize=12, color=self.colors[0])
-        ax.annotate(f'基准最大回撤: {benchmark_max_drawdown:.2f}%', 
-                  xy=(0.02, 0.10), xycoords='axes fraction', 
+        ax.annotate(benchmark_max_dd_label,
+                  xy=(0.02, 0.10), xycoords='axes fraction',
                   fontsize=12, color=self.colors[1])
         
         # 调整布局
@@ -213,12 +340,15 @@ class Plotter:
         # 保存图表
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"回撤图已保存至: {save_path}")
+            if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+                logger.info(f"Drawdown chart saved to: {save_path}")
+            else:
+                logger.info(f"回撤图已保存至: {save_path}")
         
         return fig
     
-    def plot_trade_analysis(self, trades_df: pd.DataFrame, 
-                          title: str = '交易分析', 
+    def plot_trade_analysis(self, trades_df: pd.DataFrame,
+                          title: str = None,
                           save_path: str = None) -> plt.Figure:
         """
         绘制交易分析图
@@ -231,16 +361,48 @@ class Plotter:
         Returns:
             matplotlib Figure对象
         """
+        # 根据字体支持情况选择中文或英文标题和警告
+        if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+            default_title = 'Trade Analysis'
+            empty_data_warning = "Cannot plot trade analysis: data is empty"
+        else:
+            default_title = '交易分析'
+            empty_data_warning = "无法绘制交易分析图：数据为空"
+            
+        # 使用提供的标题或默认标题
+        title = title or default_title
+            
         if trades_df.empty:
-            logger.warning("无法绘制交易分析图：数据为空")
+            logger.warning(empty_data_warning)
             return None
         
         # 筛选卖出交易
         sell_trades = trades_df[trades_df['type'] == 'sell']
         
         if sell_trades.empty:
-            logger.warning("无法绘制交易分析图：没有卖出交易")
+            if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+                logger.warning("Cannot plot trade analysis: no sell trades")
+            else:
+                logger.warning("无法绘制交易分析图：没有卖出交易")
             return None
+        
+        # 根据字体支持情况选择中文或英文标签
+        if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+            profit_dist_title = 'Profit Distribution'
+            profit_label = 'Profit (%)'
+            trade_count_label = 'Trade Count'
+            hold_time_title = 'Holding Period Distribution'
+            hold_days_label = 'Holding Days'
+            profit_time_title = 'Profit vs Holding Period'
+            exit_reason_title = 'Exit Reason Analysis'
+        else:
+            profit_dist_title = '收益率分布'
+            profit_label = '收益率 (%)'
+            trade_count_label = '交易次数'
+            hold_time_title = '持仓时间分布'
+            hold_days_label = '持仓天数'
+            profit_time_title = '收益率与持仓时间关系'
+            exit_reason_title = '平仓原因分析'
         
         # 创建图表
         fig, axes = plt.subplots(2, 2, figsize=(15, 12))
@@ -248,30 +410,52 @@ class Plotter:
         # 1. 收益分布直方图
         sns.histplot(sell_trades['profit_pct'], bins=20, kde=True, ax=axes[0, 0], color=self.colors[0])
         axes[0, 0].axvline(x=0, color='red', linestyle='--')
-        axes[0, 0].set_title('收益率分布', fontsize=14)
-        axes[0, 0].set_xlabel('收益率 (%)', fontsize=12)
-        axes[0, 0].set_ylabel('交易次数', fontsize=12)
+        axes[0, 0].set_title(profit_dist_title, fontsize=14)
+        axes[0, 0].set_xlabel(profit_label, fontsize=12)
+        axes[0, 0].set_ylabel(trade_count_label, fontsize=12)
         
         # 2. 持仓时间分布
         sns.histplot(sell_trades['hold_days'], bins=20, kde=True, ax=axes[0, 1], color=self.colors[1])
-        axes[0, 1].set_title('持仓时间分布', fontsize=14)
-        axes[0, 1].set_xlabel('持仓天数', fontsize=12)
-        axes[0, 1].set_ylabel('交易次数', fontsize=12)
+        axes[0, 1].set_title(hold_time_title, fontsize=14)
+        axes[0, 1].set_xlabel(hold_days_label, fontsize=12)
+        axes[0, 1].set_ylabel(trade_count_label, fontsize=12)
         
         # 3. 收益率与持仓时间散点图
-        sns.scatterplot(x='hold_days', y='profit_pct', data=sell_trades, ax=axes[1, 0], 
+        sns.scatterplot(x='hold_days', y='profit_pct', data=sell_trades, ax=axes[1, 0],
                        hue='profit_pct', palette='RdYlGn', size='profit_pct', sizes=(20, 200),
                        legend=False)
         axes[1, 0].axhline(y=0, color='red', linestyle='--')
-        axes[1, 0].set_title('收益率与持仓时间关系', fontsize=14)
-        axes[1, 0].set_xlabel('持仓天数', fontsize=12)
-        axes[1, 0].set_ylabel('收益率 (%)', fontsize=12)
+        axes[1, 0].set_title(profit_time_title, fontsize=14)
+        axes[1, 0].set_xlabel(hold_days_label, fontsize=12)
+        axes[1, 0].set_ylabel(profit_label, fontsize=12)
         
         # 4. 平仓原因分析
         reason_counts = sell_trades['reason'].value_counts()
-        axes[1, 1].pie(reason_counts, labels=reason_counts.index, autopct='%1.1f%%',
-                     colors=sns.color_palette('Set2', len(reason_counts)))
-        axes[1, 1].set_title('平仓原因分析', fontsize=14)
+        
+        # 如果使用英文标签，尝试翻译平仓原因
+        if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+            # 创建中英文对照字典
+            reason_translation = {
+                '止损': 'Stop Loss',
+                '止盈': 'Take Profit',
+                '趋势转变': 'Trend Reversal',
+                '跌破EMA': 'Below EMA',
+                '跌入云层': 'Into Cloud',
+                '其他': 'Other'
+            }
+            
+            # 尝试翻译标签
+            translated_index = []
+            for reason in reason_counts.index:
+                translated_index.append(reason_translation.get(reason, reason))
+            
+            axes[1, 1].pie(reason_counts, labels=translated_index, autopct='%1.1f%%',
+                         colors=sns.color_palette('Set2', len(reason_counts)))
+        else:
+            axes[1, 1].pie(reason_counts, labels=reason_counts.index, autopct='%1.1f%%',
+                         colors=sns.color_palette('Set2', len(reason_counts)))
+            
+        axes[1, 1].set_title(exit_reason_title, fontsize=14)
         
         # 添加总标题
         plt.suptitle(title, fontsize=16)
@@ -283,12 +467,15 @@ class Plotter:
         # 保存图表
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"交易分析图已保存至: {save_path}")
+            if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+                logger.info(f"Trade analysis chart saved to: {save_path}")
+            else:
+                logger.info(f"交易分析图已保存至: {save_path}")
         
         return fig
     
-    def plot_stock_signals(self, stock_data: pd.DataFrame, ts_code: str, 
-                         title: str = None, 
+    def plot_stock_signals(self, stock_data: pd.DataFrame, ts_code: str,
+                         title: str = None,
                          save_path: str = None) -> plt.Figure:
         """
         绘制单只股票的信号和指标
@@ -302,13 +489,39 @@ class Plotter:
         Returns:
             matplotlib Figure对象
         """
+        # 根据字体支持情况选择中文或英文标签
+        if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+            empty_data_warning = f"Cannot plot signal chart for stock {ts_code}: data is empty"
+            default_title = f"Stock {ts_code} Signal Analysis"
+            price_label = "Price"
+            close_price_label = "Close Price"
+            volume_label = "Volume"
+            volume_ma_label = "Volume MA"
+            date_label = "Date"
+            buy_signal_label = "Buy Signal"
+            sell_signal_label = "Sell Signal"
+            lead_line1_label = "Lead Line 1"
+            lead_line2_label = "Lead Line 2"
+        else:
+            empty_data_warning = f"无法绘制股票{ts_code}信号图：数据为空"
+            default_title = f"股票 {ts_code} 信号分析"
+            price_label = "价格"
+            close_price_label = "收盘价"
+            volume_label = "成交量"
+            volume_ma_label = "成交量均线"
+            date_label = "日期"
+            buy_signal_label = "买入信号"
+            sell_signal_label = "卖出信号"
+            lead_line1_label = "先行带1"
+            lead_line2_label = "先行带2"
+            
         if stock_data.empty:
-            logger.warning(f"无法绘制股票{ts_code}信号图：数据为空")
+            logger.warning(empty_data_warning)
             return None
         
         # 设置标题
         if title is None:
-            title = f"股票 {ts_code} 信号分析"
+            title = default_title
         
         # 转换日期格式
         stock_data['date'] = pd.to_datetime(stock_data['trade_date'])
@@ -320,39 +533,39 @@ class Plotter:
         ax1 = axes[0]
         
         # 绘制K线图
-        ax1.plot(stock_data['date'], stock_data['close'], label='收盘价', color='black')
+        ax1.plot(stock_data['date'], stock_data['close'], label=close_price_label, color='black')
         
         # 绘制EMA
         if 'ema144' in stock_data.columns:
-            ax1.plot(stock_data['date'], stock_data['ema144'], label='EMA144', 
+            ax1.plot(stock_data['date'], stock_data['ema144'], label='EMA144',
                    color=self.colors[0], linewidth=1.5)
         
         # 绘制Ichimoku云层
         if 'lead_line1' in stock_data.columns and 'lead_line2' in stock_data.columns:
-            ax1.plot(stock_data['date'], stock_data['lead_line1'], label='先行带1', 
+            ax1.plot(stock_data['date'], stock_data['lead_line1'], label=lead_line1_label,
                    color=self.colors[1], linewidth=1, alpha=0.7)
-            ax1.plot(stock_data['date'], stock_data['lead_line2'], label='先行带2', 
+            ax1.plot(stock_data['date'], stock_data['lead_line2'], label=lead_line2_label,
                    color=self.colors[2], linewidth=1, alpha=0.7)
             
             # 填充云层
-            ax1.fill_between(stock_data['date'], stock_data['lead_line1'], stock_data['lead_line2'], 
+            ax1.fill_between(stock_data['date'], stock_data['lead_line1'], stock_data['lead_line2'],
                           where=stock_data['lead_line1'] >= stock_data['lead_line2'],
                           color='green', alpha=0.2)
-            ax1.fill_between(stock_data['date'], stock_data['lead_line1'], stock_data['lead_line2'], 
+            ax1.fill_between(stock_data['date'], stock_data['lead_line1'], stock_data['lead_line2'],
                           where=stock_data['lead_line1'] < stock_data['lead_line2'],
                           color='red', alpha=0.2)
         
         # 绘制买入信号
         if 'all_uptrend' in stock_data.columns and 'price_above_ema' in stock_data.columns and 'price_above_cloud' in stock_data.columns:
             buy_signals = stock_data[
-                (stock_data['all_uptrend'] == 1) & 
-                (stock_data['price_above_ema'] == 1) & 
+                (stock_data['all_uptrend'] == 1) &
+                (stock_data['price_above_ema'] == 1) &
                 (stock_data['price_above_cloud'] == 1)
             ]
             
             if not buy_signals.empty:
-                ax1.scatter(buy_signals['date'], buy_signals['close'], 
-                          marker='^', color='green', s=100, label='买入信号')
+                ax1.scatter(buy_signals['date'], buy_signals['close'],
+                          marker='^', color='green', s=100, label=buy_signal_label)
         
         # 绘制卖出信号
         if 'all_uptrend' in stock_data.columns and 'price_above_ema' in stock_data.columns and 'price_above_cloud' in stock_data.columns:
@@ -360,14 +573,14 @@ class Plotter:
             stock_data['uptrend_change'] = stock_data['all_uptrend'].diff().fillna(0)
             
             sell_signals = stock_data[
-                ((stock_data['price_above_ema'] == 0) | 
+                ((stock_data['price_above_ema'] == 0) |
                  (stock_data['price_above_cloud'] == 0) |
                  (stock_data['uptrend_change'] == -1))
             ]
             
             if not sell_signals.empty:
-                ax1.scatter(sell_signals['date'], sell_signals['close'], 
-                          marker='v', color='red', s=100, label='卖出信号')
+                ax1.scatter(sell_signals['date'], sell_signals['close'],
+                          marker='v', color='red', s=100, label=sell_signal_label)
         
         # 设置x轴格式
         ax1.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
@@ -378,7 +591,7 @@ class Plotter:
         ax1.grid(True, alpha=0.3)
         ax1.legend(loc='upper left')
         ax1.set_title(title, fontsize=15)
-        ax1.set_ylabel('价格', fontsize=12)
+        ax1.set_ylabel(price_label, fontsize=12)
         
         # 2. 成交量
         ax2 = axes[1]
@@ -389,7 +602,7 @@ class Plotter:
         
         # 绘制成交量均线
         if 'volume_ma' in stock_data.columns:
-            ax2.plot(stock_data['date'], stock_data['volume_ma'], color='blue', linewidth=1.5, label='成交量均线')
+            ax2.plot(stock_data['date'], stock_data['volume_ma'], color='blue', linewidth=1.5, label=volume_ma_label)
         
         # 设置x轴格式
         ax2.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m-%d'))
@@ -398,7 +611,7 @@ class Plotter:
         
         # 添加网格和标签
         ax2.grid(True, alpha=0.3)
-        ax2.set_ylabel('成交量', fontsize=12)
+        ax2.set_ylabel(volume_label, fontsize=12)
         ax2.legend(loc='upper left')
         
         # 3. RSI
@@ -422,7 +635,7 @@ class Plotter:
         
         # 添加网格和标签
         ax3.grid(True, alpha=0.3)
-        ax3.set_xlabel('日期', fontsize=12)
+        ax3.set_xlabel(date_label, fontsize=12)
         ax3.set_ylabel('RSI', fontsize=12)
         
         # 调整布局
@@ -431,12 +644,15 @@ class Plotter:
         # 保存图表
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"股票{ts_code}信号图已保存至: {save_path}")
+            if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+                logger.info(f"Stock {ts_code} signal chart saved to: {save_path}")
+            else:
+                logger.info(f"股票{ts_code}信号图已保存至: {save_path}")
         
         return fig
     
     def plot_performance_metrics(self, metrics: Dict,
-                              title: str = '绩效指标',
+                              title: str = None,
                               save_path: str = None) -> plt.Figure:
         """
         绘制绩效指标图表
@@ -449,20 +665,55 @@ class Plotter:
         Returns:
             matplotlib Figure对象
         """
+        # 根据字体支持情况选择中文或英文标签
+        if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+            default_title = 'Performance Metrics'
+            empty_data_warning = "Cannot plot performance metrics: data is empty"
+            value_label = "Value"
+            metrics_labels = {
+                'total_return': 'Total Return (%)',
+                'annual_return': 'Annual Return (%)',
+                'sharpe_ratio': 'Sharpe Ratio',
+                'max_drawdown': 'Max Drawdown (%)',
+                'win_rate': 'Win Rate (%)',
+                'profit_loss_ratio': 'Profit/Loss Ratio',
+                'avg_hold_days': 'Avg Holding Days',
+                'total_trades': 'Total Trades'
+            }
+            save_message = f"Performance metrics chart saved to: {save_path}"
+        else:
+            default_title = '绩效指标'
+            empty_data_warning = "无法绘制绩效指标图：数据为空"
+            value_label = "值"
+            metrics_labels = {
+                'total_return': '总收益率 (%)',
+                'annual_return': '年化收益率 (%)',
+                'sharpe_ratio': '夏普比率',
+                'max_drawdown': '最大回撤 (%)',
+                'win_rate': '胜率 (%)',
+                'profit_loss_ratio': '盈亏比',
+                'avg_hold_days': '平均持仓天数',
+                'total_trades': '总交易次数'
+            }
+            save_message = f"绩效指标图已保存至: {save_path}"
+            
+        # 使用提供的标题或默认标题
+        title = title or default_title
+            
         if not metrics:
-            logger.warning("无法绘制绩效指标图：数据为空")
+            logger.warning(empty_data_warning)
             return None
         
         # 提取关键指标
         key_metrics = {
-            '总收益率 (%)': metrics.get('total_return', 0),
-            '年化收益率 (%)': metrics.get('annual_return', 0),
-            '夏普比率': metrics.get('sharpe_ratio', 0),
-            '最大回撤 (%)': metrics.get('max_drawdown', 0),
-            '胜率 (%)': metrics.get('win_rate', 0),
-            '盈亏比': metrics.get('profit_loss_ratio', 0),
-            '平均持仓天数': metrics.get('avg_hold_days', 0),
-            '总交易次数': metrics.get('total_trades', 0)
+            metrics_labels['total_return']: metrics.get('total_return', 0),
+            metrics_labels['annual_return']: metrics.get('annual_return', 0),
+            metrics_labels['sharpe_ratio']: metrics.get('sharpe_ratio', 0),
+            metrics_labels['max_drawdown']: metrics.get('max_drawdown', 0),
+            metrics_labels['win_rate']: metrics.get('win_rate', 0),
+            metrics_labels['profit_loss_ratio']: metrics.get('profit_loss_ratio', 0),
+            metrics_labels['avg_hold_days']: metrics.get('avg_hold_days', 0),
+            metrics_labels['total_trades']: metrics.get('total_trades', 0)
         }
         
         # 创建图表
@@ -496,7 +747,7 @@ class Plotter:
         
         # 设置标题和标签
         ax.set_title(title, fontsize=15)
-        ax.set_ylabel('值', fontsize=12)
+        ax.set_ylabel(value_label, fontsize=12)
         
         # 旋转x轴标签
         plt.xticks(rotation=45, ha='right')
@@ -507,7 +758,7 @@ class Plotter:
         # 保存图表
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
-            logger.info(f"绩效指标图已保存至: {save_path}")
+            logger.info(save_message)
         
         return fig
     
@@ -522,8 +773,24 @@ class Plotter:
         Returns:
             报告保存路径
         """
+        # 根据字体支持情况选择中文或英文标签
+        if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+            empty_data_warning = "Cannot generate backtest report: data is empty"
+            portfolio_title = "Portfolio Performance"
+            drawdown_title = "Drawdown Analysis"
+            trade_title = "Trade Analysis"
+            metrics_title = "Performance Metrics"
+            report_message = f"Backtest report generated to directory: {output_dir}"
+        else:
+            empty_data_warning = "无法生成回测报告：数据为空"
+            portfolio_title = "投资组合表现"
+            drawdown_title = "回撤分析"
+            trade_title = "交易分析"
+            metrics_title = "绩效指标"
+            report_message = f"回测报告已生成至目录: {output_dir}"
+            
         if not backtest_results:
-            logger.warning("无法生成回测报告：数据为空")
+            logger.warning(empty_data_warning)
             return ""
         
         # 设置输出目录
@@ -546,14 +813,14 @@ class Plotter:
             # 绘制投资组合表现图
             self.plot_portfolio_performance(
                 daily_performance,
-                title='投资组合表现',
+                title=portfolio_title,
                 save_path=os.path.join(output_dir, f'portfolio_performance_{timestamp}.png')
             )
             
             # 绘制回撤图
             self.plot_drawdown(
                 daily_performance,
-                title='回撤分析',
+                title=drawdown_title,
                 save_path=os.path.join(output_dir, f'drawdown_{timestamp}.png')
             )
         
@@ -561,7 +828,7 @@ class Plotter:
             # 绘制交易分析图
             self.plot_trade_analysis(
                 trade_summary,
-                title='交易分析',
+                title=trade_title,
                 save_path=os.path.join(output_dir, f'trade_analysis_{timestamp}.png')
             )
         
@@ -569,9 +836,9 @@ class Plotter:
         if metrics:
             self.plot_performance_metrics(
                 metrics,
-                title='绩效指标',
+                title=metrics_title,
                 save_path=os.path.join(output_dir, f'performance_metrics_{timestamp}.png')
             )
         
-        logger.info(f"回测报告已生成至目录: {output_dir}")
+        logger.info(report_message)
         return output_dir

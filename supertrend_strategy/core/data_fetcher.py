@@ -109,22 +109,43 @@ class DataFetcher:
         Returns:
             股票代码列表
         """
-        if not self.stock_list or refresh:
-            try:
-                # 获取所有A股列表
-                data = self.pro.stock_basic(
-                    exchange='',
-                    list_status='L',
-                    fields='ts_code,symbol,name,area,industry,list_date'
-                )
-                # 过滤科创板、创业板等特殊板块（如有需要）
-                # data = data[~data['ts_code'].str.startswith(('688', '300', '301'))]
-                
-                self.stock_list = data['ts_code'].tolist()
-                logger.info(f"获取股票列表成功，共{len(self.stock_list)}只股票")
-            except Exception as e:
-                logger.error(f"获取股票列表失败: {e}")
-                raise
+        # 生成缓存键
+        cache_key = "stock_list"
+        
+        # 如果不强制刷新，先检查本地缓存
+        if self.stock_list and not refresh:
+            logger.info(f"从本地缓存获取股票列表")
+            return self.stock_list
+        
+        # 如果不强制刷新，再检查Redis缓存
+        if not refresh:
+            redis_data = self._get_from_redis(cache_key)
+            if redis_data is not None:
+                # 缓存到本地
+                self.stock_list = redis_data
+                logger.info(f"从Redis获取股票列表成功，共{len(self.stock_list)}只股票")
+                return self.stock_list
+        
+        try:
+            # 从Tushare获取所有A股列表
+            logger.info(f"从Tushare获取股票列表")
+            data = self.pro.stock_basic(
+                exchange='',
+                list_status='L',
+                fields='ts_code,symbol,name,area,industry,list_date'
+            )
+            # 过滤科创板、创业板等特殊板块（如有需要）
+            # data = data[~data['ts_code'].str.startswith(('688', '300', '301'))]
+            
+            self.stock_list = data['ts_code'].tolist()
+            
+            # 缓存数据到Redis
+            self._save_to_redis(cache_key, self.stock_list)
+            
+            logger.info(f"从Tushare获取股票列表成功，共{len(self.stock_list)}只股票")
+        except Exception as e:
+            logger.error(f"获取股票列表失败: {e}")
+            raise
         
         return self.stock_list
     
@@ -140,23 +161,45 @@ class DataFetcher:
         Returns:
             交易日期列表
         """
-        if not self.trade_dates or refresh:
-            start = start_date or self.config['data']['start_date']
-            end = end_date or self.config['data']['end_date']
+        # 设置日期范围
+        start = start_date or self.config['data']['start_date']
+        end = end_date or self.config['data']['end_date']
+        
+        # 生成缓存键
+        cache_key = f"trade_dates:{start}:{end}"
+        
+        # 如果不强制刷新，先检查本地缓存
+        if self.trade_dates and not refresh:
+            logger.info(f"从本地缓存获取交易日历")
+            return self.trade_dates
+        
+        # 如果不强制刷新，再检查Redis缓存
+        if not refresh:
+            redis_data = self._get_from_redis(cache_key)
+            if redis_data is not None:
+                # 缓存到本地
+                self.trade_dates = redis_data
+                logger.info(f"从Redis获取交易日历成功，从{start}到{end}共{len(self.trade_dates)}个交易日")
+                return self.trade_dates
+        
+        try:
+            # 从Tushare获取交易日历
+            logger.info(f"从Tushare获取交易日历，日期范围: {start}至{end}")
+            df = self.pro.trade_cal(
+                exchange='SSE',
+                start_date=start.replace('-', ''),
+                end_date=end.replace('-', ''),
+                is_open='1'
+            )
+            self.trade_dates = df['cal_date'].tolist()
             
-            try:
-                # 获取交易日历
-                df = self.pro.trade_cal(
-                    exchange='SSE',
-                    start_date=start.replace('-', ''),
-                    end_date=end.replace('-', ''),
-                    is_open='1'
-                )
-                self.trade_dates = df['cal_date'].tolist()
-                logger.info(f"获取交易日历成功，从{start}到{end}共{len(self.trade_dates)}个交易日")
-            except Exception as e:
-                logger.error(f"获取交易日历失败: {e}")
-                raise
+            # 缓存数据到Redis
+            self._save_to_redis(cache_key, self.trade_dates)
+            
+            logger.info(f"从Tushare获取交易日历成功，从{start}到{end}共{len(self.trade_dates)}个交易日")
+        except Exception as e:
+            logger.error(f"获取交易日历失败: {e}")
+            raise
         
         return self.trade_dates
     
@@ -178,7 +221,7 @@ class DataFetcher:
             # 使用pickle序列化DataFrame
             serialized_data = pickle.dumps(data)
             self.redis.setex(key, self.redis_ttl, serialized_data)
-            logger.debug(f"数据已保存到Redis: {key}")
+            logger.debug(f"数据已成功保存到Redis: {key}, TTL: {self.redis_ttl}秒")
             return True
         except Exception as e:
             logger.warning(f"保存数据到Redis失败: {e}")
@@ -202,7 +245,7 @@ class DataFetcher:
             if data:
                 # 使用pickle反序列化数据
                 deserialized_data = pickle.loads(data)
-                logger.info(f"从Redis获取数据成功: {key}")
+                logger.debug(f"Redis缓存命中: {key}, 成功获取数据")
                 return deserialized_data
             return None
         except Exception as e:
@@ -246,7 +289,7 @@ class DataFetcher:
         
         try:
             # 从Tushare获取日线数据
-            logger.debug(f"从Tushare获取股票{ts_code}数据，日期范围: {start}至{end}")
+            logger.debug(f"Redis缓存未命中，从Tushare获取股票{ts_code}数据，日期范围: {start}至{end}")
             df = ts.pro_bar(
                 ts_code=ts_code,
                 start_date=start.replace('-', ''),
@@ -272,7 +315,7 @@ class DataFetcher:
             # 缓存数据到Redis
             self._save_to_redis(cache_key, df)
             
-            logger.debug(f"从Tushare获取股票{ts_code}数据成功，从{start}到{end}共{len(df)}条记录")
+            logger.debug(f"从Tushare获取股票{ts_code}数据成功，从{start}到{end}共{len(df)}条记录，已保存到Redis")
             return df
             
         except Exception as e:
@@ -304,7 +347,7 @@ class DataFetcher:
         
         try:
             # 从Tushare获取最新财务指标
-            logger.info(f"从Tushare获取股票{ts_code}基本面数据")
+            logger.debug(f"Redis缓存未命中，从Tushare获取股票{ts_code}基本面数据")
             df_basic = self.pro.daily_basic(
                 ts_code=ts_code,
                 trade_date=datetime.now().strftime('%Y%m%d'),
@@ -330,7 +373,7 @@ class DataFetcher:
             # 如果获取到数据，缓存到Redis
             if not result.empty:
                 self._save_to_redis(cache_key, result)
-                logger.info(f"获取并缓存股票{ts_code}基本面数据成功")
+                logger.debug(f"从Tushare获取股票{ts_code}基本面数据成功，已保存到Redis")
             
             return result
                 
@@ -557,7 +600,10 @@ class DataFetcher:
         df['turnover_signal'] = np.where(df['turnover_rate'] >= turnover_threshold, 1, 0)
     
     def _calculate_chip_concentration(self, df: pd.DataFrame) -> None:
-        """计算筹码集中度"""
+        """
+        计算筹码集中度
+        基于Pine脚本实现的改进版本，使用动态窗口大小和尾部密集区计算
+        """
         # 获取参数
         threshold = self.config['chip_concentration']['threshold']
         
@@ -565,40 +611,58 @@ class DataFetcher:
         df['concentration_ratio'] = np.nan
         df['dominant_price'] = np.nan
         
-        # 计算筹码集中度（简化版本）
-        window_size = 30  # 使用30天窗口
-        
-        for i in range(window_size, len(df)):
-            # 获取窗口数据
-            window = df.iloc[i-window_size:i]
+        # 计算成交量加权平均价格（VWAP）作为主力成本
+        for i in range(10, len(df)):  # 至少需要10天数据
+            # 获取历史成交量数据
+            volume_array = df.iloc[:i]['vol'].values
             
-            # 计算成交量加权平均价格
-            total_vol = window['vol'].sum()
-            if total_vol > 0:
-                weighted_sum = (window['close'] * window['vol']).sum()
-                dominant_price = weighted_sum / total_vol
+            # 前置条件校验：至少10天数据且所有成交量非负
+            if len(volume_array) >= 10 and np.min(volume_array) >= 0:
+                # 计算动态窗口大小
+                window_size = max(3, int(np.sqrt(len(volume_array))))
                 
-                # 计算价格在主力成本附近的成交量占比
-                price_range = 0.05  # 5%范围内
-                in_range_vol = window.loc[
-                    (window['close'] >= dominant_price * (1 - price_range)) &
-                    (window['close'] <= dominant_price * (1 + price_range)),
-                    'vol'
-                ].sum()
+                # 对成交量数组排序（升序）
+                sorted_volumes = np.sort(volume_array)
                 
-                concentration_ratio = (in_range_vol / total_vol) * 100
+                # 计算尾部密集区（最近的高成交量区域）
+                start_idx = max(0, len(sorted_volumes) - window_size)
                 
-                df.loc[df.index[i], 'concentration_ratio'] = concentration_ratio
-                df.loc[df.index[i], 'dominant_price'] = dominant_price
+                # 计算总成交量和密集区成交量
+                sum_total = np.sum(sorted_volumes)
+                sum_dense = np.sum(sorted_volumes[start_idx:])
+                
+                # 计算筹码集中度
+                if sum_total > 0 and sum_dense > 0:
+                    concentration_ratio = min(100, (sum_dense / (sum_total + 1e-6)) * 100)
+                    df.loc[df.index[i], 'concentration_ratio'] = concentration_ratio
+                
+                # 计算主力成本价（VWAP）
+                window = df.iloc[:i]
+                total_vol = window['vol'].sum()
+                if total_vol > 0:
+                    weighted_sum = (window['close'] * window['vol']).sum()
+                    dominant_price = weighted_sum / total_vol
+                    df.loc[df.index[i], 'dominant_price'] = dominant_price
         
         # 计算筹码集中度信号
+        # 根据Pine脚本实现：
+        # costValid = not na(dominantPrice) ?
+        #   (math.abs(close[1] - dominantPrice)/dominantPrice*100 < (100-chipConcentration)) and
+        #   (concentrationRatio >= chipConcentration) : false
+        
+        # 使用前一天收盘价计算偏离度
+        df['prev_close'] = df['close'].shift(1)
+        
         df['cost_valid'] = np.where(
-            (~df['concentration_ratio'].isna()) & 
-            (df['concentration_ratio'] >= threshold) &
             (~df['dominant_price'].isna()) &
-            (abs(df['close'] - df['dominant_price']) / df['dominant_price'] * 100 < (100 - threshold)),
+            (~df['concentration_ratio'].isna()) &
+            (df['concentration_ratio'] >= threshold) &  # 筹码集中度高于阈值
+            (abs(df['prev_close'] - df['dominant_price']) / df['dominant_price'] * 100 < (100 - threshold)),  # 价格偏离主力成本小于(100-threshold)%
             1, 0
         )
+        
+        # 记录日志
+        logger.info(f"筹码集中度计算完成，阈值: {threshold}%")
     
     def _calculate_rsi(self, df: pd.DataFrame) -> None:
         """计算RSI指标"""
@@ -665,5 +729,5 @@ class DataFetcher:
         if result:
             self._save_to_redis(batch_cache_key, result)
         
-        logger.info(f"批量获取{len(ts_codes)}只股票数据，成功获取{len(result)}只")
+        logger.info(f"批量获取{len(ts_codes)}只股票数据，成功获取{len(result)}只，已保存到Redis")
         return result
