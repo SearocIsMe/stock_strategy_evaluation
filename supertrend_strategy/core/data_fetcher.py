@@ -5,6 +5,9 @@ import tushare as ts
 import yaml
 import logging
 import warnings
+import redis
+import json
+import pickle
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Union, Optional
 
@@ -14,7 +17,7 @@ warnings.filterwarnings("ignore", category=FutureWarning, module="tushare")
 # 配置日志
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(filename)s:%(lineno)d - %(message)s'
 )
 logger = logging.getLogger('DataFetcher')
 
@@ -37,8 +40,11 @@ class DataFetcher:
         # 初始化tushare
         self._init_tushare()
         
+        # 初始化Redis连接
+        self._init_redis()
+        
         # 缓存数据
-        self.stock_data = {}  # 股票数据缓存
+        self.stock_data = {}  # 本地股票数据缓存
         self.stock_list = []  # 股票列表缓存
         self.trade_dates = [] # 交易日期缓存
         
@@ -64,6 +70,34 @@ class DataFetcher:
         except Exception as e:
             logger.error(f"Tushare API初始化失败: {e}")
             raise
+    
+    def _init_redis(self):
+        """初始化Redis连接"""
+        try:
+            # 获取Redis配置
+            redis_config = self.config.get('redis', {})
+            host = redis_config.get('host', 'localhost')
+            port = redis_config.get('port', 6379)
+            db = redis_config.get('db', 0)
+            password = redis_config.get('password', None)
+            self.redis_ttl = redis_config.get('ttl', 86400)  # 默认缓存1天
+            
+            # 创建Redis连接
+            self.redis = redis.Redis(
+                host=host,
+                port=port,
+                db=db,
+                password=password if password else None,
+                decode_responses=False  # 不自动解码，因为我们存储的是二进制数据
+            )
+            
+            # 测试连接
+            self.redis.ping()
+            logger.info(f"Redis连接成功: {host}:{port}/{db}")
+            self.redis_available = True
+        except Exception as e:
+            logger.warning(f"Redis连接失败: {e}，将使用本地缓存")
+            self.redis_available = False
     
     def get_stock_list(self, refresh: bool = False) -> List[str]:
         """
@@ -126,7 +160,56 @@ class DataFetcher:
         
         return self.trade_dates
     
-    def get_stock_data(self, ts_code: str, start_date: str = None, end_date: str = None, 
+    def _save_to_redis(self, key: str, data) -> bool:
+        """
+        将数据保存到Redis
+        
+        Args:
+            key: Redis键
+            data: 要保存的数据
+            
+        Returns:
+            是否保存成功
+        """
+        if not self.redis_available:
+            return False
+            
+        try:
+            # 使用pickle序列化DataFrame
+            serialized_data = pickle.dumps(data)
+            self.redis.setex(key, self.redis_ttl, serialized_data)
+            logger.debug(f"数据已保存到Redis: {key}")
+            return True
+        except Exception as e:
+            logger.warning(f"保存数据到Redis失败: {e}")
+            return False
+    
+    def _get_from_redis(self, key: str):
+        """
+        从Redis获取数据
+        
+        Args:
+            key: Redis键
+            
+        Returns:
+            获取的数据，如果不存在则返回None
+        """
+        if not self.redis_available:
+            return None
+            
+        try:
+            data = self.redis.get(key)
+            if data:
+                # 使用pickle反序列化数据
+                deserialized_data = pickle.loads(data)
+                logger.info(f"从Redis获取数据成功: {key}")
+                return deserialized_data
+            return None
+        except Exception as e:
+            logger.warning(f"从Redis获取数据失败: {e}")
+            return None
+    
+    def get_stock_data(self, ts_code: str, start_date: str = None, end_date: str = None,
                        refresh: bool = False) -> pd.DataFrame:
         """
         获取单只股票的日线数据并计算技术指标
@@ -140,19 +223,30 @@ class DataFetcher:
         Returns:
             包含价格和技术指标的DataFrame
         """
-        # 生成缓存键
-        cache_key = f"{ts_code}_{start_date}_{end_date}"
-        
-        # 检查缓存
-        if cache_key in self.stock_data and not refresh:
-            return self.stock_data[cache_key]
-        
         # 设置日期范围
         start = start_date or self.config['data']['start_date']
         end = end_date or self.config['data']['end_date']
         
+        # 生成缓存键
+        cache_key = f"stock_data:{ts_code}:{start}:{end}"
+        
+        # 如果不强制刷新，先检查本地缓存
+        if cache_key in self.stock_data and not refresh:
+            logger.info(f"从本地缓存获取股票{ts_code}数据")
+            return self.stock_data[cache_key]
+        
+        # 如果不强制刷新，再检查Redis缓存
+        if not refresh:
+            redis_data = self._get_from_redis(cache_key)
+            if redis_data is not None:
+                # 缓存到本地
+                self.stock_data[cache_key] = redis_data
+                logger.info(f"从Redis获取股票{ts_code}数据成功，从{start}到{end}共{len(redis_data)}条记录")
+                return redis_data
+        
         try:
-            # 获取日线数据
+            # 从Tushare获取日线数据
+            logger.debug(f"从Tushare获取股票{ts_code}数据，日期范围: {start}至{end}")
             df = ts.pro_bar(
                 ts_code=ts_code,
                 start_date=start.replace('-', ''),
@@ -172,28 +266,45 @@ class DataFetcher:
             # 计算技术指标
             df = self._calculate_indicators(df)
             
-            # 缓存数据
+            # 缓存数据到本地
             self.stock_data[cache_key] = df
             
-            logger.info(f"获取股票{ts_code}数据成功，从{start}到{end}共{len(df)}条记录")
+            # 缓存数据到Redis
+            self._save_to_redis(cache_key, df)
+            
+            logger.debug(f"从Tushare获取股票{ts_code}数据成功，从{start}到{end}共{len(df)}条记录")
             return df
             
         except Exception as e:
             logger.error(f"获取股票{ts_code}数据失败: {e}")
             return pd.DataFrame()
     
-    def get_fundamental_data(self, ts_code: str) -> pd.DataFrame:
+    def get_fundamental_data(self, ts_code: str, refresh: bool = False) -> pd.DataFrame:
         """
         获取股票基本面数据
         
         Args:
             ts_code: 股票代码（tushare格式）
+            refresh: 是否强制刷新缓存
             
         Returns:
             基本面数据DataFrame
         """
+        # 生成缓存键
+        today = datetime.now().strftime('%Y-%m-%d')
+        quarter = self._get_latest_quarter()
+        cache_key = f"fundamental:{ts_code}:{today}:{quarter}"
+        
+        # 如果不强制刷新，检查Redis缓存
+        if not refresh:
+            redis_data = self._get_from_redis(cache_key)
+            if redis_data is not None:
+                logger.info(f"从Redis获取股票{ts_code}基本面数据成功")
+                return redis_data
+        
         try:
-            # 获取最新财务指标
+            # 从Tushare获取最新财务指标
+            logger.info(f"从Tushare获取股票{ts_code}基本面数据")
             df_basic = self.pro.daily_basic(
                 ts_code=ts_code,
                 trade_date=datetime.now().strftime('%Y%m%d'),
@@ -203,20 +314,25 @@ class DataFetcher:
             # 获取最新财务报表
             df_finance = self.pro.fina_indicator(
                 ts_code=ts_code,
-                period=self._get_latest_quarter(),
+                period=quarter,
                 fields='ts_code,ann_date,end_date,grossprofit_margin,netprofit_margin,roe,roa'
             )
             
             # 合并数据
+            result = pd.DataFrame()
             if not df_basic.empty and not df_finance.empty:
                 result = pd.merge(df_basic, df_finance, on='ts_code', how='left')
-                return result
             elif not df_basic.empty:
-                return df_basic
+                result = df_basic
             elif not df_finance.empty:
-                return df_finance
-            else:
-                return pd.DataFrame()
+                result = df_finance
+            
+            # 如果获取到数据，缓存到Redis
+            if not result.empty:
+                self._save_to_redis(cache_key, result)
+                logger.info(f"获取并缓存股票{ts_code}基本面数据成功")
+            
+            return result
                 
         except Exception as e:
             logger.error(f"获取股票{ts_code}基本面数据失败: {e}")
@@ -510,8 +626,8 @@ class DataFetcher:
         # 计算超买信号
         df['overbought'] = np.where(df['rsi'] > overbought, 1, 0)
 
-    def get_batch_stock_data(self, ts_codes: List[str], start_date: str = None, 
-                            end_date: str = None) -> Dict[str, pd.DataFrame]:
+    def get_batch_stock_data(self, ts_codes: List[str], start_date: str = None,
+                            end_date: str = None, refresh: bool = False) -> Dict[str, pd.DataFrame]:
         """
         批量获取多只股票数据
         
@@ -519,15 +635,35 @@ class DataFetcher:
             ts_codes: 股票代码列表
             start_date: 开始日期
             end_date: 结束日期
+            refresh: 是否强制刷新缓存
             
         Returns:
             股票数据字典 {股票代码: 数据DataFrame}
         """
+        # 设置日期范围
+        start = start_date or self.config['data']['start_date']
+        end = end_date or self.config['data']['end_date']
+        
+        # 生成批量缓存键
+        batch_cache_key = f"batch_stock_data:{','.join(ts_codes)}:{start}:{end}"
+        
+        # 如果不强制刷新，检查Redis缓存
+        if not refresh:
+            redis_data = self._get_from_redis(batch_cache_key)
+            if redis_data is not None:
+                logger.info(f"从Redis获取批量股票数据成功，共{len(redis_data)}只")
+                return redis_data
+        
+        # 逐个获取股票数据
         result = {}
         for ts_code in ts_codes:
-            df = self.get_stock_data(ts_code, start_date, end_date)
+            df = self.get_stock_data(ts_code, start_date, end_date, refresh)
             if not df.empty:
                 result[ts_code] = df
+        
+        # 缓存批量结果到Redis
+        if result:
+            self._save_to_redis(batch_cache_key, result)
         
         logger.info(f"批量获取{len(ts_codes)}只股票数据，成功获取{len(result)}只")
         return result

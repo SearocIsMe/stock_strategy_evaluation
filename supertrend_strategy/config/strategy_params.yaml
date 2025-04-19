@@ -6,6 +6,14 @@ data:
   start_date: "2024-01-01"  # 回测开始日期
   end_date: "2024-01-31"    # 回测结束日期
   universe: "A"             # 股票池: A=所有A股
+  
+# Redis缓存配置
+redis:
+  host: "localhost"
+  port: 6379
+  db: 0
+  password: ""
+  ttl: 86400  # 缓存过期时间(秒)，默认1天
 
 # 资金管理参数
 capital:
@@ -48,7 +56,7 @@ volume:
 
 # 筹码集中度参数
 chip_concentration:
-  threshold: 50             # 筹码集中度阈值(%)
+  threshold: 30             # 筹码集中度阈值(%)
 
 # 止盈止损参数
 exit:

@@ -11,6 +11,9 @@ seaborn==0.13.1
 tushare==2.5.3
 akshare==1.11.20
 
+# Caching and data storage
+redis==5.0.1
+
 # Configuration and utilities
 pyyaml==6.0.1
 
