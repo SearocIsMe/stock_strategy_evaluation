@@ -2,9 +2,9 @@
 
 # 数据获取参数
 data:
-  tushare_token: "a56e2085d63e65ca75096d2b1e014fb7e767abb40fa4a6f9a1416e39"  # 替换为您的Tushare API token
-  start_date: "2020-01-01"  # 回测开始日期
-  end_date: "2023-12-31"    # 回测结束日期
+  tushare_token: "123"  # 可通过环境变量TUSHARE_TOKEN覆盖
+  start_date: "2024-01-01"  # 回测开始日期
+  end_date: "2024-01-31"    # 回测结束日期
   universe: "A"             # 股票池: A=所有A股
 
 # 资金管理参数
@@ -42,7 +42,7 @@ weekly_ma:
 
 # 量能参数
 volume:
-  multiplier: 1.8           # 放量倍数
+  multiplier: 1.5           # 放量倍数
   turnover_threshold: 3.0   # 最低换手率(%)
   ma_period: 20             # 成交量均线周期
 

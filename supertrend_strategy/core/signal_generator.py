@@ -51,6 +51,12 @@ class SignalGenerator:
             信号字典 {股票代码: {'signal': 信号, 'score': 分数, ...}}
         """
         signals = {}
+        total_stocks = len(stock_data)
+        valid_stocks = 0
+        stocks_with_buy_signal = 0
+        stocks_with_sell_signal = 0
+        
+        logger.info(f"开始为日期 {date} 生成信号，共 {total_stocks} 只股票")
         
         for ts_code, df in stock_data.items():
             # 确保数据不为空且包含指定日期
@@ -64,14 +70,20 @@ class SignalGenerator:
             if date_idx < 20:  # 至少需要20天数据
                 continue
             
+            valid_stocks += 1
+            
             # 获取当天数据
             current_data = df.iloc[date_idx]
             
             # 生成买入信号
             buy_signal = self._generate_buy_signal(df, date_idx)
+            if buy_signal == 1:
+                stocks_with_buy_signal += 1
             
             # 生成卖出信号
             sell_signal = self._generate_sell_signal(df, date_idx)
+            if sell_signal == 1:
+                stocks_with_sell_signal += 1
             
             # 计算股票评分
             score = self._calculate_stock_score(df, date_idx)
@@ -93,7 +105,11 @@ class SignalGenerator:
                 'cost_valid': current_data['cost_valid'] if 'cost_valid' in current_data else None
             }
         
-        logger.info(f"日期{date}生成信号完成，共{len(signals)}只股票")
+        logger.info(f"日期 {date} 信号生成完成:")
+        logger.info(f"  - 有效股票: {valid_stocks}/{total_stocks}")
+        logger.info(f"  - 买入信号: {stocks_with_buy_signal} 只")
+        logger.info(f"  - 卖出信号: {stocks_with_sell_signal} 只")
+        
         return signals
     
     def _generate_buy_signal(self, df: pd.DataFrame, idx: int) -> int:

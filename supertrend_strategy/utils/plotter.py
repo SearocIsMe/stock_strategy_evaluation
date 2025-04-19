@@ -1,5 +1,8 @@
 import pandas as pd
 import numpy as np
+import matplotlib
+# Set the backend to 'Agg' to avoid GUI dependencies
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import seaborn as sns
@@ -7,6 +10,17 @@ from typing import Dict, List, Tuple, Union, Optional
 import os
 from datetime import datetime
 import logging
+import platform
+
+# 检测WSL环境
+is_wsl = False
+if platform.system() == "Linux":
+    try:
+        with open('/proc/version', 'r') as f:
+            if 'microsoft' in f.read().lower():
+                is_wsl = True
+    except:
+        pass
 
 # 配置日志
 logging.basicConfig(
@@ -14,6 +28,10 @@ logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger('Plotter')
+
+# 记录环境信息
+if is_wsl:
+    logger.info("Detected WSL environment, using non-GUI 'Agg' backend for matplotlib")
 
 # 设置中文字体支持
 try:
@@ -414,6 +432,82 @@ class Plotter:
         if save_path:
             plt.savefig(save_path, dpi=300, bbox_inches='tight')
             logger.info(f"股票{ts_code}信号图已保存至: {save_path}")
+        
+        return fig
+    
+    def plot_performance_metrics(self, metrics: Dict,
+                              title: str = '绩效指标',
+                              save_path: str = None) -> plt.Figure:
+        """
+        绘制绩效指标图表
+        
+        Args:
+            metrics: 绩效指标字典
+            title: 图表标题
+            save_path: 保存路径，如果为None则不保存
+            
+        Returns:
+            matplotlib Figure对象
+        """
+        if not metrics:
+            logger.warning("无法绘制绩效指标图：数据为空")
+            return None
+        
+        # 提取关键指标
+        key_metrics = {
+            '总收益率 (%)': metrics.get('total_return', 0),
+            '年化收益率 (%)': metrics.get('annual_return', 0),
+            '夏普比率': metrics.get('sharpe_ratio', 0),
+            '最大回撤 (%)': metrics.get('max_drawdown', 0),
+            '胜率 (%)': metrics.get('win_rate', 0),
+            '盈亏比': metrics.get('profit_loss_ratio', 0),
+            '平均持仓天数': metrics.get('avg_hold_days', 0),
+            '总交易次数': metrics.get('total_trades', 0)
+        }
+        
+        # 创建图表
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # 绘制条形图
+        metrics_names = list(key_metrics.keys())
+        metrics_values = list(key_metrics.values())
+        
+        # 确定条形图颜色
+        colors = []
+        for name, value in key_metrics.items():
+            if '收益率' in name or '夏普比率' in name or '胜率' in name or '盈亏比' in name:
+                colors.append('green' if value > 0 else 'red')
+            elif '回撤' in name:
+                colors.append('red')
+            else:
+                colors.append(self.colors[0])
+        
+        # 绘制条形图
+        bars = ax.bar(metrics_names, metrics_values, color=colors)
+        
+        # 添加数值标签
+        for bar in bars:
+            height = bar.get_height()
+            ax.annotate(f'{height:.2f}',
+                      xy=(bar.get_x() + bar.get_width() / 2, height),
+                      xytext=(0, 3),  # 3 points vertical offset
+                      textcoords="offset points",
+                      ha='center', va='bottom')
+        
+        # 设置标题和标签
+        ax.set_title(title, fontsize=15)
+        ax.set_ylabel('值', fontsize=12)
+        
+        # 旋转x轴标签
+        plt.xticks(rotation=45, ha='right')
+        
+        # 调整布局
+        plt.tight_layout()
+        
+        # 保存图表
+        if save_path:
+            plt.savefig(save_path, dpi=300, bbox_inches='tight')
+            logger.info(f"绩效指标图已保存至: {save_path}")
         
         return fig
     

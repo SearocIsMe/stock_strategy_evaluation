@@ -1,0 +1,23 @@
+# Data processing and analysis
+pandas==2.1.4
+numpy==1.26.3
+tqdm==4.66.1
+
+# Data visualization
+matplotlib==3.8.2
+seaborn==0.13.1
+
+# Financial data
+tushare==2.5.3
+akshare==1.11.20
+
+# Configuration and utilities
+pyyaml==6.0.1
+
+# Optional: Jupyter notebooks for analysis
+jupyter==1.0.0
+notebook==7.0.6
+
+# Optional: Web dashboard
+streamlit==1.30.0
+plotly==5.18.0

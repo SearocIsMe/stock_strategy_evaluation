@@ -4,8 +4,12 @@ import numpy as np
 import tushare as ts
 import yaml
 import logging
+import warnings
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Union, Optional
+
+# Suppress tushare warnings
+warnings.filterwarnings("ignore", category=FutureWarning, module="tushare")
 
 # 配置日志
 logging.basicConfig(
@@ -52,7 +56,8 @@ class DataFetcher:
     def _init_tushare(self):
         """初始化tushare API"""
         try:
-            token = self.config['data']['tushare_token']
+            # 优先使用环境变量中的token，如果不存在则使用配置文件中的token
+            token = os.environ.get('TUSHARE_TOKEN') or self.config['data']['tushare_token']
             ts.set_token(token)
             self.pro = ts.pro_api()
             logger.info("Tushare API初始化成功")

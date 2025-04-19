@@ -123,13 +123,27 @@ class BacktestEngine:
         
         # 初始资金
         initial_capital = self.config['capital']['initial']
+        logger.info(f"初始资金: {initial_capital:,.2f}元")
         
         # 记录每日表现
         daily_performance = []
         
+        # 交易统计
+        total_buy_trades = 0
+        total_sell_trades = 0
+        profitable_trades = 0
+        losing_trades = 0
+        
         # 遍历每个交易日
+        total_days = len(trade_dates)
+        logger.info(f"共 {total_days} 个交易日需要回测")
+        
         iterator = tqdm(trade_dates) if verbose else trade_dates
-        for date in iterator:
+        for i, date in enumerate(iterator):
+            # 显示进度
+            if i % 20 == 0 and not verbose:  # 如果使用tqdm则不需要额外显示进度
+                logger.info(f"回测进度: {i}/{total_days} ({i/total_days*100:.1f}%)")
+            
             # 生成当日信号
             signals = self.signal_generator.generate_signals(all_stock_data, date)
             
@@ -139,6 +153,28 @@ class BacktestEngine:
             # 记录交易
             for trade in opened + closed:
                 self.trade_history.append(trade)
+            
+            # 统计交易
+            total_buy_trades += len(opened)
+            total_sell_trades += len(closed)
+            
+            # 记录买入交易
+            if opened:
+                buy_details = [f"{t['ts_code']}({t['price']:.2f}元)" for t in opened]
+                logger.info(f"日期 {date} 买入 {len(opened)} 只股票: {', '.join(buy_details)}")
+            
+            # 记录卖出交易并统计盈亏
+            if closed:
+                sell_details = []
+                for t in closed:
+                    profit_pct = t.get('profit_pct', 0)
+                    if profit_pct > 0:
+                        profitable_trades += 1
+                    else:
+                        losing_trades += 1
+                    sell_details.append(f"{t['ts_code']}({profit_pct:+.2f}%)")
+                
+                logger.info(f"日期 {date} 卖出 {len(closed)} 只股票: {', '.join(sell_details)}")
             
             # 计算当日投资组合价值
             portfolio_value = self.risk_manager.get_portfolio_value(date, all_stock_data)
@@ -160,6 +196,15 @@ class BacktestEngine:
             
             # 记录当日持仓
             self.daily_positions[date] = self.risk_manager.get_position_summary()
+            
+            # 每隔一段时间显示当前持仓和收益情况
+            if i % 50 == 0 or i == total_days - 1:
+                current_return = (portfolio_value / initial_capital - 1) * 100
+                benchmark_current_return = (benchmark_value / initial_capital - 1) * 100
+                logger.info(f"当前进度 {i+1}/{total_days} ({(i+1)/total_days*100:.1f}%)")
+                logger.info(f"当前资产: {portfolio_value:,.2f}元, 收益率: {current_return:+.2f}%")
+                logger.info(f"基准收益: {benchmark_current_return:+.2f}%, 超额收益: {current_return-benchmark_current_return:+.2f}%")
+                logger.info(f"当前持仓: {len(self.risk_manager.positions)} 只股票, 现金: {self.risk_manager.current_capital:,.2f}元")
         
         # 计算每日收益率
         daily_performance_df = pd.DataFrame(daily_performance)
@@ -188,9 +233,33 @@ class BacktestEngine:
             'trade_history': self.risk_manager.trades
         }
         
+        # 统计交易结果
+        win_rate = profitable_trades / total_sell_trades * 100 if total_sell_trades > 0 else 0
+        
+        logger.info("=" * 50)
         logger.info("回测完成")
-        logger.info(f"初始资金: {initial_capital:.2f}, 最终资金: {portfolio_value:.2f}")
-        logger.info(f"总收益率: {(portfolio_value/initial_capital - 1)*100:.2f}%")
+        logger.info("=" * 50)
+        logger.info(f"初始资金: {initial_capital:,.2f}元, 最终资金: {portfolio_value:,.2f}元")
+        logger.info(f"总收益率: {(portfolio_value/initial_capital - 1)*100:+.2f}%")
+        logger.info(f"基准收益率: {(benchmark_value/initial_capital - 1)*100:+.2f}%")
+        logger.info(f"超额收益: {((portfolio_value/initial_capital) - (benchmark_value/initial_capital))*100:+.2f}%")
+        logger.info("-" * 50)
+        logger.info("交易统计:")
+        logger.info(f"总交易次数: {total_buy_trades} 买入, {total_sell_trades} 卖出")
+        logger.info(f"盈利交易: {profitable_trades} 次, 亏损交易: {losing_trades} 次")
+        logger.info(f"胜率: {win_rate:.2f}%")
+        
+        # 显示绩效指标
+        metrics = performance_metrics
+        logger.info("-" * 50)
+        logger.info("绩效指标:")
+        logger.info(f"年化收益率: {metrics.get('annual_return', 0):+.2f}%")
+        logger.info(f"夏普比率: {metrics.get('sharpe_ratio', 0):.2f}")
+        logger.info(f"最大回撤: {metrics.get('max_drawdown', 0):.2f}%")
+        logger.info(f"波动率: {metrics.get('volatility', 0):.2f}%")
+        logger.info(f"平均持仓天数: {metrics.get('avg_hold_days', 0):.1f}天")
+        logger.info(f"平均收益率: {metrics.get('avg_profit_pct', 0):+.2f}%")
+        logger.info("=" * 50)
         
         return backtest_results
     
