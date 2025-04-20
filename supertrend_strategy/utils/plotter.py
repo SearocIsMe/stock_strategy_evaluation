@@ -33,96 +33,53 @@ logger = logging.getLogger('Plotter')
 if is_wsl:
     logger.info("Detected WSL environment, using non-GUI 'Agg' backend for matplotlib")
 
-# 检查字体是否能渲染特定的中文字符
-def check_font_for_chinese(font_name):
-    try:
-        from matplotlib.font_manager import FontProperties
-        import matplotlib.pyplot as plt
-        from matplotlib.backends.backend_agg import FigureCanvasAgg
-        
-        # 测试字符，包括常见的中文字符和特定的"投"字和"撤"字
-        test_chars = "中文测试投资撤回"
-        
-        # 创建一个临时图形来测试字体
-        fig = plt.figure(figsize=(1, 1))
-        canvas = FigureCanvasAgg(fig)
-        ax = fig.add_subplot(111)
-        
-        # 尝试使用指定字体渲染文本
-        font_prop = FontProperties(family=font_name)
-        ax.text(0.5, 0.5, test_chars, fontproperties=font_prop)
-        
-        # 渲染图形到内存
-        canvas.draw()
-        
-        # 如果没有抛出异常，则认为字体可以渲染中文
-        plt.close(fig)
-        return True
-    except Exception:
-        return False
+# 全局变量，用于存储是否使用英文标签
+USE_ENGLISH_LABELS = True
 
-# 设置中文字体支持
-try:
-    # 尝试多种支持中文的字体，按优先级排序
-    cjk_fonts = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 'Noto Sans CJK SC', 'Noto Sans CJK JP',
-                 'Droid Sans Fallback', 'Arial Unicode MS', 'DejaVu Sans']
-    
-    # 检查matplotlib可用的字体
-    from matplotlib.font_manager import fontManager, FontProperties
-    available_fonts = [f.name for f in fontManager.ttflist]
-    
-    # 找到第一个可用的CJK字体
-    font_found = False
-    for font in cjk_fonts:
-        if font in available_fonts and check_font_for_chinese(font):
-            plt.rcParams['font.sans-serif'] = [font] + plt.rcParams['font.sans-serif']
-            font_found = True
-            logger.info(f"使用字体 '{font}' 显示中文字符")
-            break
-    
-    # 默认使用英文标签，除非明确找到了支持所有测试字符的中文字体
-    USE_ENGLISH_LABELS = True
-    
-    if font_found:
-        # 即使找到了字体，也进行额外测试确保它能渲染所有需要的字符
-        try:
-            # 创建一个临时图形来测试更多字符
-            fig = plt.figure(figsize=(1, 1))
-            ax = fig.add_subplot(111)
-            
-            # 测试更多可能出现的中文字符
-            test_text = "投资回撤分析交易策略收益率"
-            font_prop = FontProperties(family=plt.rcParams['font.sans-serif'][0])
-            ax.text(0.5, 0.5, test_text, fontproperties=font_prop)
-            
-            # 渲染到内存
-            fig.canvas.draw()
-            plt.close(fig)
-            
-            # 如果没有抛出异常，可以使用中文标签
-            USE_ENGLISH_LABELS = False
-            logger.info("中文字体测试通过，将使用中文标签")
-        except Exception as e:
-            logger.warning(f"中文字体测试失败: {e}，将使用英文标签")
-    else:
-        # 如果没有找到理想的字体，尝试使用系统默认字体
-        plt.rcParams['font.sans-serif'] = ['sans-serif']
-        logger.warning("未找到支持中文的字体，将使用英文标签")
-    
-    plt.rcParams['axes.unicode_minus'] = False    # 用来正常显示负号
-    
-    # 额外设置，确保字体可以正确渲染
-    plt.rcParams['font.family'] = 'sans-serif'
-    
-except Exception as e:
-    logger.warning(f"设置中文字体时出错: {e}，将使用英文标签")
-    USE_ENGLISH_LABELS = True
+# 空行，移除全局字体设置代码
 
 class Plotter:
     """
     绘图工具类
     负责可视化回测结果和生成图表
     """
+    
+    @staticmethod
+    def check_font_for_chinese(font_name):
+        """
+        检查字体是否能渲染特定的中文字符
+        
+        Args:
+            font_name: 字体名称
+            
+        Returns:
+            bool: 是否支持中文
+        """
+        try:
+            from matplotlib.font_manager import FontProperties
+            import matplotlib.pyplot as plt
+            from matplotlib.backends.backend_agg import FigureCanvasAgg
+            
+            # 测试字符，包括常见的中文字符和特定的"投"字和"撤"字
+            test_chars = "中文测试投资撤回"
+            
+            # 创建一个临时图形来测试字体
+            fig = plt.figure(figsize=(1, 1))
+            canvas = FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111)
+            
+            # 尝试使用指定字体渲染文本
+            font_prop = FontProperties(family=font_name)
+            ax.text(0.5, 0.5, test_chars, fontproperties=font_prop)
+            
+            # 渲染图形到内存
+            canvas.draw()
+            
+            # 如果没有抛出异常，则认为字体可以渲染中文
+            plt.close(fig)
+            return True
+        except Exception:
+            return False
     
     def __init__(self, output_dir: str = 'results'):
         """
@@ -139,6 +96,69 @@ class Plotter:
         # 设置绘图风格
         sns.set_style('whitegrid')
         self.colors = sns.color_palette('Set1')
+        
+        # 设置中文字体支持
+        self.setup_chinese_font()
+        
+    def setup_chinese_font(self):
+        """设置中文字体支持"""
+        global USE_ENGLISH_LABELS
+        
+        try:
+            # 尝试多种支持中文的字体，按优先级排序
+            cjk_fonts = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 'Noto Sans CJK SC', 'Noto Sans CJK JP',
+                         'Droid Sans Fallback', 'Arial Unicode MS', 'DejaVu Sans']
+            
+            # 检查matplotlib可用的字体
+            from matplotlib.font_manager import fontManager, FontProperties
+            available_fonts = [f.name for f in fontManager.ttflist]
+            
+            # 找到第一个可用的CJK字体
+            font_found = False
+            for font in cjk_fonts:
+                if font in available_fonts and self.check_font_for_chinese(font):
+                    plt.rcParams['font.sans-serif'] = [font] + plt.rcParams['font.sans-serif']
+                    font_found = True
+                    logger.info(f"使用字体 '{font}' 显示中文字符")
+                    break
+            
+            # 默认使用英文标签，除非明确找到了支持所有测试字符的中文字体
+            USE_ENGLISH_LABELS = True
+            
+            if font_found:
+                # 即使找到了字体，也进行额外测试确保它能渲染所有需要的字符
+                try:
+                    # 创建一个临时图形来测试更多字符
+                    fig = plt.figure(figsize=(1, 1))
+                    ax = fig.add_subplot(111)
+                    
+                    # 测试更多可能出现的中文字符
+                    test_text = "投资回撤分析交易策略收益率"
+                    font_prop = FontProperties(family=plt.rcParams['font.sans-serif'][0])
+                    ax.text(0.5, 0.5, test_text, fontproperties=font_prop)
+                    
+                    # 渲染到内存
+                    fig.canvas.draw()
+                    plt.close(fig)
+                    
+                    # 如果没有抛出异常，可以使用中文标签
+                    USE_ENGLISH_LABELS = False
+                    logger.info("中文字体测试通过，将使用中文标签")
+                except Exception as e:
+                    logger.warning(f"中文字体测试失败: {e}，将使用英文标签")
+            else:
+                # 如果没有找到理想的字体，尝试使用系统默认字体
+                plt.rcParams['font.sans-serif'] = ['sans-serif']
+                logger.warning("未找到支持中文的字体，将使用英文标签")
+            
+            plt.rcParams['axes.unicode_minus'] = False    # 用来正常显示负号
+            
+            # 额外设置，确保字体可以正确渲染
+            plt.rcParams['font.family'] = 'sans-serif'
+            
+        except Exception as e:
+            logger.warning(f"设置中文字体时出错: {e}，将使用英文标签")
+            USE_ENGLISH_LABELS = True
     
     def plot_portfolio_performance(self, daily_performance: pd.DataFrame, 
                                  title: str = '策略表现', 
@@ -761,6 +781,95 @@ class Plotter:
             logger.info(save_message)
         
         return fig
+        
+    def plot_performance_comparison(self, daily_performance: pd.DataFrame,
+                                  title: str = None,
+                                  save_path: str = None) -> plt.Figure:
+        """
+        绘制策略与基准收益率对比直方图
+        
+        Args:
+            daily_performance: 每日表现DataFrame
+            title: 图表标题
+            save_path: 保存路径，如果为None则不保存
+            
+        Returns:
+            matplotlib Figure对象
+        """
+        # 根据字体支持情况选择中文或英文标题和警告
+        if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
+            default_title = 'Strategy vs Benchmark Performance'
+            empty_data_warning = "Cannot plot performance comparison: data is empty"
+            strategy_label = "Strategy"
+            benchmark_label = "Benchmark"
+            return_label = "Return (%)"
+            save_message = f"Performance comparison chart saved to: {save_path}"
+        else:
+            default_title = '策略与基准收益率对比'
+            empty_data_warning = "无法绘制收益率对比图：数据为空"
+            strategy_label = "策略"
+            benchmark_label = "基准"
+            return_label = "收益率 (%)"
+            save_message = f"收益率对比图已保存至: {save_path}"
+            
+        # 使用提供的标题或默认标题
+        title = title or default_title
+            
+        if daily_performance.empty:
+            logger.warning(empty_data_warning)
+            return None
+        
+        # 计算总收益率
+        if len(daily_performance) > 0:
+            initial_value = daily_performance['portfolio_value'].iloc[0]
+            final_value = daily_performance['portfolio_value'].iloc[-1]
+            total_return = (final_value / initial_value - 1) * 100
+            
+            benchmark_initial = daily_performance['benchmark_value'].iloc[0]
+            benchmark_final = daily_performance['benchmark_value'].iloc[-1]
+            benchmark_return = (benchmark_final / benchmark_initial - 1) * 100
+            
+            # 创建图表
+            fig, ax = plt.subplots(figsize=(10, 6))
+            
+            # 创建数据
+            returns = [total_return, benchmark_return]
+            labels = [strategy_label, benchmark_label]
+            colors = ['green' if r > 0 else 'red' for r in returns]
+            
+            # 绘制条形图
+            bars = ax.bar(labels, returns, color=colors)
+            
+            # 添加数值标签
+            for bar in bars:
+                height = bar.get_height()
+                ax.annotate(f'{height:.2f}%',
+                          xy=(bar.get_x() + bar.get_width() / 2, height),
+                          xytext=(0, 3),  # 3 points vertical offset
+                          textcoords="offset points",
+                          ha='center', va='bottom')
+            
+            # 添加标题和标签
+            ax.set_title(title, fontsize=15)
+            ax.set_ylabel(return_label, fontsize=12)
+            
+            # 添加网格
+            ax.grid(True, alpha=0.3, axis='y')
+            
+            # 添加零线
+            ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+            
+            # 调整布局
+            plt.tight_layout()
+            
+            # 保存图表
+            if save_path:
+                plt.savefig(save_path, dpi=300, bbox_inches='tight')
+                logger.info(save_message)
+            
+            return fig
+        
+        return None
     
     def generate_report(self, backtest_results: Dict, output_dir: str = None) -> str:
         """
@@ -778,6 +887,7 @@ class Plotter:
             empty_data_warning = "Cannot generate backtest report: data is empty"
             portfolio_title = "Portfolio Performance"
             drawdown_title = "Drawdown Analysis"
+            comparison_title = "Strategy vs Benchmark Comparison"
             trade_title = "Trade Analysis"
             metrics_title = "Performance Metrics"
             report_message = f"Backtest report generated to directory: {output_dir}"
@@ -785,6 +895,7 @@ class Plotter:
             empty_data_warning = "无法生成回测报告：数据为空"
             portfolio_title = "投资组合表现"
             drawdown_title = "回撤分析"
+            comparison_title = "策略与基准收益率对比"
             trade_title = "交易分析"
             metrics_title = "绩效指标"
             report_message = f"回测报告已生成至目录: {output_dir}"
@@ -815,6 +926,13 @@ class Plotter:
                 daily_performance,
                 title=portfolio_title,
                 save_path=os.path.join(output_dir, f'portfolio_performance_{timestamp}.png')
+            )
+            
+            # 绘制策略与基准收益率对比图
+            self.plot_performance_comparison(
+                daily_performance,
+                title=comparison_title,
+                save_path=os.path.join(output_dir, f'performance_comparison_{timestamp}.png')
             )
             
             # 绘制回撤图
