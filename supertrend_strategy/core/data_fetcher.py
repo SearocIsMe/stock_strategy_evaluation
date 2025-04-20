@@ -55,6 +55,27 @@ class DataFetcher:
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
+            
+            # 检查是否使用新的策略配置格式
+            if 'strategies' in config:
+                # 获取默认策略或第一个可用策略
+                strategy_id = config.get('active_strategy', 'default')
+                if strategy_id not in config['strategies']:
+                    available_strategies = list(config['strategies'].keys())
+                    if available_strategies:
+                        strategy_id = available_strategies[0]
+                        logger.warning(f"策略 '{strategy_id}' 不存在，使用 '{available_strategies[0]}'")
+                    else:
+                        logger.warning("配置文件中没有定义任何策略，使用原始配置")
+                        return config
+                
+                # 合并策略配置到主配置
+                strategy_config = config['strategies'][strategy_id]
+                for key, value in strategy_config.items():
+                    config[key] = value
+                
+                logger.info(f"使用策略配置: {strategy_id}")
+            
             logger.info(f"配置文件加载成功: {config_path}")
             return config
         except Exception as e:
@@ -773,6 +794,23 @@ class DataFetcher:
         # 使用前一天收盘价计算偏离度
         df['prev_close'] = df['close'].shift(1)
         
+        # 计算筹码集中度比率 (concentration_ratio / threshold)
+        df['cost_valid_ratio'] = np.where(
+            (~df['dominant_price'].isna()) &
+            (~df['concentration_ratio'].isna()),
+            df['concentration_ratio'] / threshold,  # 筹码集中度与阈值的比率
+            0
+        )
+        
+        # 计算价格偏离度比率
+        df['price_deviation_ratio'] = np.where(
+            (~df['dominant_price'].isna()) &
+            (~df['prev_close'].isna()),
+            1 - (abs(df['prev_close'] - df['dominant_price']) / df['dominant_price'] * 100) / (100 - threshold),  # 价格偏离度与阈值的比率
+            0
+        )
+        
+        # 保留原始的二元信号，但同时提供比率值
         df['cost_valid'] = np.where(
             (~df['dominant_price'].isna()) &
             (~df['concentration_ratio'].isna()) &

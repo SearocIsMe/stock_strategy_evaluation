@@ -4,6 +4,7 @@ import logging
 import yaml
 from typing import Dict, List, Tuple, Union, Optional
 from datetime import datetime, timedelta
+from core.data_fetcher import DataFetcher
 
 # 配置日志
 logging.basicConfig(
@@ -27,25 +28,51 @@ class SignalGenerator:
         """
         # 加载配置
         self.config = self._load_config(config_path)
+        
+        # 初始化数据获取器，用于获取基本面数据
+        self.data_fetcher = DataFetcher(config_path)
     
     def _load_config(self, config_path: str) -> dict:
         """加载配置文件"""
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
+            
+            # 检查是否使用新的策略配置格式
+            if 'strategies' in config:
+                # 获取默认策略或第一个可用策略
+                strategy_id = config.get('active_strategy', 'default')
+                if strategy_id not in config['strategies']:
+                    available_strategies = list(config['strategies'].keys())
+                    if available_strategies:
+                        strategy_id = available_strategies[0]
+                        logger.warning(f"策略 '{strategy_id}' 不存在，使用 '{available_strategies[0]}'")
+                    else:
+                        logger.warning("配置文件中没有定义任何策略，使用原始配置")
+                        return config
+                
+                # 合并策略配置到主配置
+                strategy_config = config['strategies'][strategy_id]
+                for key, value in strategy_config.items():
+                    config[key] = value
+                
+                logger.info(f"使用策略配置: {strategy_id}")
+            
             logger.info(f"配置文件加载成功: {config_path}")
             return config
         except Exception as e:
             logger.error(f"配置文件加载失败: {e}")
             raise
     
-    def generate_signals(self, stock_data: Dict[str, pd.DataFrame], date: str) -> Dict[str, Dict]:
+    def generate_signals(self, stock_data: Dict[str, pd.DataFrame], date: str,
+                        current_positions: Dict[str, Dict] = None) -> Dict[str, Dict]:
         """
         为指定日期生成所有股票的信号
         
         Args:
             stock_data: 股票数据字典 {股票代码: 数据DataFrame}
             date: 日期字符串 (YYYYMMDD)
+            current_positions: 当前持仓 {股票代码: 持仓信息}，用于卖出信号约束
             
         Returns:
             信号字典 {股票代码: {'signal': 信号, 'score': 分数, ...}}
@@ -55,6 +82,10 @@ class SignalGenerator:
         valid_stocks = 0
         stocks_with_buy_signal = 0
         stocks_with_sell_signal = 0
+        
+        # 初始化当前持仓
+        if current_positions is None:
+            current_positions = {}
         
         logger.info(f"开始为日期 {date} 生成信号，共 {total_stocks} 只股票")
         
@@ -80,13 +111,45 @@ class SignalGenerator:
             if buy_signal == 1:
                 stocks_with_buy_signal += 1
             
-            # 生成卖出信号
-            sell_signal = self._generate_sell_signal(df, date_idx)
-            if sell_signal == 1:
-                stocks_with_sell_signal += 1
+            # 生成卖出信号 - 只有当股票在当前持仓中时才考虑卖出信号
+            sell_signal = 0
+            if ts_code in current_positions:
+                sell_signal = self._generate_sell_signal(df, date_idx)
+                if sell_signal == 1:
+                    stocks_with_sell_signal += 1
             
             # 计算股票评分
             score = self._calculate_stock_score(df, date_idx)
+            
+            # 获取基本面数据用于计算ROE/PB
+            roe_pb_score = 0
+            ema20_deviation_score = 0
+            
+            # 获取基本面数据
+            try:
+                fundamental_data = self.data_fetcher.get_fundamental_data(ts_code)
+                if not fundamental_data.empty:
+                    # 计算ROE/PB比率
+                    if 'roe' in fundamental_data.columns and 'pb' in fundamental_data.columns:
+                        roe = fundamental_data['roe'].iloc[0]
+                        pb = fundamental_data['pb'].iloc[0]
+                        
+                        if not pd.isna(roe) and not pd.isna(pb) and pb > 0:
+                            roe_pb_ratio = roe / pb
+                            # ROE/PB比率越高，分数越高 (最高10分)
+                            # 一般来说，ROE/PB > 1 是比较好的
+                            roe_pb_score = min(10, roe_pb_ratio * 5)
+            except Exception as e:
+                logger.warning(f"获取股票{ts_code}基本面数据失败: {e}")
+            
+            # 计算EMA(20)乖离率
+            if 'close' in current_data and date_idx >= 20:
+                # 计算EMA(20)
+                ema20 = df['close'].iloc[date_idx-20:date_idx+1].ewm(span=20, adjust=False).mean().iloc[-1]
+                # 计算乖离率
+                deviation = abs(current_data['close'] / ema20 - 1) * 100
+                # 乖离率越小，分数越高 (最高10分)
+                ema20_deviation_score = max(0, 10 - deviation)
             
             # 存储信号
             signals[ts_code] = {
@@ -102,7 +165,11 @@ class SignalGenerator:
                 'weekly_condition': current_data['weekly_condition'] if 'weekly_condition' in current_data else None,
                 'volume_signal': current_data['volume_signal'] if 'volume_signal' in current_data else None,
                 'turnover_signal': current_data['turnover_signal'] if 'turnover_signal' in current_data else None,
-                'cost_valid': current_data['cost_valid'] if 'cost_valid' in current_data else None
+                'cost_valid': current_data['cost_valid'] if 'cost_valid' in current_data else None,
+                'cost_valid_ratio': current_data['cost_valid_ratio'] if 'cost_valid_ratio' in current_data else None,
+                'price_deviation_ratio': current_data['price_deviation_ratio'] if 'price_deviation_ratio' in current_data else None,
+                'ema20_deviation_score': ema20_deviation_score,
+                'roe_pb_score': roe_pb_score
             }
         
         logger.info(f"日期 {date} 信号生成完成:")
@@ -127,7 +194,10 @@ class SignalGenerator:
                     f"周线条件={data['weekly_condition']}" if data['weekly_condition'] is not None else "周线条件=N/A",
                     f"成交量信号={data['volume_signal']}" if data['volume_signal'] is not None else "成交量信号=N/A",
                     f"换手率信号={data['turnover_signal']}" if data['turnover_signal'] is not None else "换手率信号=N/A",
-                    f"筹码集中={data['cost_valid']}" if data['cost_valid'] is not None else "筹码集中=N/A"
+                    f"筹码集中比率={data.get('cost_valid_ratio', 0):.2f}" if 'cost_valid_ratio' in data else "筹码集中比率=N/A",
+                    f"价格偏离比率={data.get('price_deviation_ratio', 0):.2f}" if 'price_deviation_ratio' in data else "价格偏离比率=N/A",
+                    f"EMA20乖离率评分={data.get('ema20_deviation_score', 0):.2f}",
+                    f"ROE/PB评分={data.get('roe_pb_score', 0):.2f}"
                 ]
                 
                 # 添加指标信息到日志
@@ -236,34 +306,56 @@ class SignalGenerator:
         # 基础分数
         base_score = 0.0
         
-        # 趋势强度 (40分)
+        # 趋势强度 (35分)
         trend_score = 0.0
         if 'all_uptrend' in current and current['all_uptrend'] == 1:
-            trend_score += 15.0
+            trend_score += 12.0
         if 'price_above_ema' in current and current['price_above_ema'] == 1:
             trend_score += 10.0
         if 'price_above_cloud' in current and current['price_above_cloud'] == 1:
-            trend_score += 15.0
+            trend_score += 13.0
         
-        # 量能评分 (30分)
+        # 量能评分 (25分)
         volume_score = 0.0
         if 'volume_signal' in current and current['volume_signal'] == 1:
-            volume_score += 15.0
+            volume_score += 12.5
         if 'turnover_signal' in current and current['turnover_signal'] == 1:
-            volume_score += 15.0
+            volume_score += 12.5
         
-        # 筹码评分 (20分)
+        # 筹码评分 (15分) - 使用筹码集中度比率
         chip_score = 0.0
-        if 'cost_valid' in current and current['cost_valid'] == 1:
-            chip_score += 20.0
+        if 'cost_valid_ratio' in current and not pd.isna(current['cost_valid_ratio']):
+            # 筹码集中度比率越高，得分越高 (最高15分)
+            # 比率至少为1才能得到满分
+            chip_score = min(15.0, current['cost_valid_ratio'] * 15.0)
+        elif 'cost_valid' in current and current['cost_valid'] == 1:
+            # 兼容旧版本
+            chip_score += 15.0
         
-        # 周线评分 (10分)
+        # 周线评分 (5分)
         weekly_score = 0.0
         if 'weekly_condition' in current and current['weekly_condition'] == 1:
-            weekly_score += 10.0
+            weekly_score += 5.0
+        
+        # EMA(20)乖离率评分 (10分)
+        ema20_deviation_score = 0.0
+        if idx >= 20:
+            # 计算EMA(20)
+            ema20 = df['close'].iloc[idx-20:idx+1].ewm(span=20, adjust=False).mean().iloc[-1]
+            # 计算乖离率
+            deviation = abs(current['close'] / ema20 - 1) * 100
+            # 乖离率越小，分数越高 (最高10分)
+            ema20_deviation_score = max(0, 10 - deviation)
+        
+        # ROE/PB评分 (10分)
+        roe_pb_score = 0.0
+        # 尝试从基本面数据计算ROE/PB
+        if 'roe' in current and 'pb' in current and not pd.isna(current['roe']) and not pd.isna(current['pb']) and current['pb'] > 0:
+            roe_pb_ratio = current['roe'] / current['pb']
+            roe_pb_score = min(10, roe_pb_ratio * 5)
         
         # 总分
-        total_score = trend_score + volume_score + chip_score + weekly_score
+        total_score = trend_score + volume_score + chip_score + weekly_score + ema20_deviation_score + roe_pb_score
         
         # RSI反向调整 (RSI越高，得分越低)
         if 'rsi' in current and not pd.isna(current['rsi']):
@@ -287,12 +379,14 @@ class SignalGenerator:
             选中的股票代码列表
         """
         # 筛选有买入信号的股票
-        buy_stocks = {ts_code: data for ts_code, data in signals.items() 
+        buy_stocks = {ts_code: data for ts_code, data in signals.items()
                      if data['buy_signal'] == 1}
         
-        # 按评分排序
-        sorted_stocks = sorted(buy_stocks.items(), 
-                              key=lambda x: x[1]['score'], 
+        # 按评分排序 - 使用总分、ROE/PB评分和EMA20乖离率作为排序因素
+        sorted_stocks = sorted(buy_stocks.items(),
+                              key=lambda x: (x[1]['score'],
+                                           x[1].get('roe_pb_score', 0),
+                                           x[1].get('ema20_deviation_score', 0)),
                               reverse=True)
         
         # 选择前N只股票
@@ -301,7 +395,7 @@ class SignalGenerator:
         logger.info(f"选股完成，从{len(buy_stocks)}只买入信号股票中选出{len(selected)}只")
         return selected
     
-    def get_position_adjustments(self, 
+    def get_position_adjustments(self,
                                current_positions: Dict[str, float],
                                signals: Dict[str, Dict],
                                max_positions: int = 10) -> Tuple[List[str], List[str]]:
@@ -316,7 +410,7 @@ class SignalGenerator:
         Returns:
             (买入列表, 卖出列表)
         """
-        # 获取卖出信号的股票
+        # 获取卖出信号的股票 - 只考虑当前持仓中的股票
         to_sell = [ts_code for ts_code in current_positions.keys()
                   if ts_code in signals and signals[ts_code]['sell_signal'] == 1]
         
@@ -330,9 +424,11 @@ class SignalGenerator:
         potential_buys = {ts_code: data for ts_code, data in signals.items()
                          if ts_code not in current_positions and data['buy_signal'] == 1}
         
-        # 按评分排序
+        # 按评分排序 - 使用总分、ROE/PB评分和EMA20乖离率作为排序因素
         sorted_buys = sorted(potential_buys.items(),
-                           key=lambda x: x[1]['score'],
+                           key=lambda x: (x[1]['score'],
+                                        x[1].get('roe_pb_score', 0),
+                                        x[1].get('ema20_deviation_score', 0)),
                            reverse=True)
         
         # 选择前N只股票

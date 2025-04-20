@@ -54,6 +54,27 @@ class BacktestEngine:
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
+            
+            # 检查是否使用新的策略配置格式
+            if 'strategies' in config:
+                # 获取默认策略或第一个可用策略
+                strategy_id = config.get('active_strategy', 'default')
+                if strategy_id not in config['strategies']:
+                    available_strategies = list(config['strategies'].keys())
+                    if available_strategies:
+                        strategy_id = available_strategies[0]
+                        logger.warning(f"策略 '{strategy_id}' 不存在，使用 '{available_strategies[0]}'")
+                    else:
+                        logger.warning("配置文件中没有定义任何策略，使用原始配置")
+                        return config
+                
+                # 合并策略配置到主配置
+                strategy_config = config['strategies'][strategy_id]
+                for key, value in strategy_config.items():
+                    config[key] = value
+                
+                logger.info(f"使用策略配置: {strategy_id}")
+            
             logger.info(f"配置文件加载成功: {config_path}")
             return config
         except Exception as e:
@@ -155,8 +176,8 @@ class BacktestEngine:
             if i % 20 == 0 and not verbose:  # 如果使用tqdm则不需要额外显示进度
                 logger.info(f"回测进度: {i}/{total_days} ({i/total_days*100:.1f}%)")
             
-            # 生成当日信号
-            signals = self.signal_generator.generate_signals(all_stock_data, date)
+            # 生成当日信号 - 传递当前持仓信息
+            signals = self.signal_generator.generate_signals(all_stock_data, date, self.risk_manager.positions)
             
             # 更新投资组合
             opened, closed = self.risk_manager.update_portfolio(date, all_stock_data, signals)

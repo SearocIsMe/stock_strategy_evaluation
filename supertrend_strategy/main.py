@@ -39,6 +39,8 @@ def parse_args():
     
     parser.add_argument('--config', type=str, default='config/strategy_params.yaml',
                       help='配置文件路径')
+    parser.add_argument('--strategy', type=str, default='default',
+                      help='策略ID (default, conservative, aggressive等)')
     parser.add_argument('--mode', type=str, choices=['backtest', 'live'], default='backtest',
                       help='运行模式: backtest=回测, live=实盘')
     parser.add_argument('--start_date', type=str, help='回测开始日期 (YYYY-MM-DD)')
@@ -55,12 +57,44 @@ def parse_args():
     
     return parser.parse_args()
 
-def load_config(config_path: str) -> dict:
-    """加载配置文件"""
+def load_config(config_path: str, strategy_id: str = 'default') -> dict:
+    """
+    加载配置文件并应用指定策略
+    
+    Args:
+        config_path: 配置文件路径
+        strategy_id: 策略ID
+        
+    Returns:
+        合并后的配置字典
+    """
     try:
         with open(config_path, 'r', encoding='utf-8') as f:
             config = yaml.safe_load(f)
-        logger.info(f"配置文件加载成功: {config_path}")
+        
+        # 检查策略是否存在
+        if 'strategies' not in config or strategy_id not in config['strategies']:
+            available_strategies = list(config.get('strategies', {}).keys())
+            if not available_strategies:
+                logger.error(f"配置文件中没有定义任何策略")
+                sys.exit(1)
+            
+            logger.warning(f"策略 '{strategy_id}' 不存在，可用策略: {', '.join(available_strategies)}")
+            logger.warning(f"将使用默认策略: {available_strategies[0]}")
+            strategy_id = available_strategies[0]
+        
+        # 获取策略配置
+        strategy_config = config['strategies'][strategy_id]
+        
+        # 移除strategies部分，避免冗余
+        if 'strategies' in config:
+            del config['strategies']
+        
+        # 合并策略配置到主配置
+        for key, value in strategy_config.items():
+            config[key] = value
+        
+        logger.info(f"配置文件加载成功: {config_path}, 使用策略: {strategy_id}")
         return config
     except Exception as e:
         logger.error(f"配置文件加载失败: {e}")
@@ -79,7 +113,7 @@ def load_stock_list(file_path: str) -> List[str]:
 
 def run_backtest(config: dict, args) -> Dict:
     """运行回测"""
-    logger.info("初始化回测组件...")
+    logger.info(f"初始化回测组件，使用策略: {args.strategy}...")
     
     # 初始化组件
     data_fetcher = DataFetcher(args.config)
@@ -162,11 +196,16 @@ def main():
     # 解析命令行参数
     args = parse_args()
     
-    # 加载配置
-    config = load_config(args.config)
+    # 加载配置，应用指定策略
+    config = load_config(args.config, args.strategy)
+    
+    # 设置活动策略，以便其他组件可以使用
+    config['active_strategy'] = args.strategy
     
     # 创建输出目录
-    os.makedirs(args.output_dir, exist_ok=True)
+    output_dir = f"{args.output_dir}/{args.strategy}"
+    os.makedirs(output_dir, exist_ok=True)
+    args.output_dir = output_dir
     
     # 根据模式运行
     if args.mode == 'backtest':
