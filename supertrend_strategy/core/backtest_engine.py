@@ -105,6 +105,10 @@ class BacktestEngine:
         if not trade_dates:
             logger.error("未获取到交易日历，回测终止")
             return {}
+            
+        # 确保交易日期按升序排序（从旧到新）
+        trade_dates = sorted(trade_dates)
+        logger.info(f"交易日期已排序，第一个交易日: {trade_dates[0]}，最后一个交易日: {trade_dates[-1]}")
         
         # 获取基准指数数据
         logger.info(f"获取基准指数{self.benchmark}数据...")

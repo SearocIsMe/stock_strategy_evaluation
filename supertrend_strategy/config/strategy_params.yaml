@@ -20,7 +20,7 @@ redis:
   password: ""
   ttl: 86400  # 缓存过期时间(秒)，默认1天
 
-# 资金管理参数
+# 资金管 理参数
 capital:
   initial: 1000000          # 初始资金(元)
   max_positions: 10         # 最大持仓数量
