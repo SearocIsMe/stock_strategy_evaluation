@@ -44,9 +44,11 @@ class DataFetcher:
         self._init_redis()
         
         # 缓存数据
-        self.stock_data = {}  # 本地股票数据缓存
-        self.stock_list = []  # 股票列表缓存
-        self.trade_dates = [] # 交易日期缓存
+        self.stock_data = {}       # 本地股票数据缓存
+        self.stock_list = []       # 股票列表缓存
+        self.all_stock_list = []   # 未过滤的股票列表缓存
+        self.trade_dates = []      # 交易日期缓存
+        self.fundamental_data = {} # 基本面数据缓存
         
     def _load_config(self, config_path: str) -> dict:
         """加载配置文件"""
@@ -134,15 +136,37 @@ class DataFetcher:
                 list_status='L',
                 fields='ts_code,symbol,name,area,industry,list_date'
             )
-            # 过滤科创板、创业板等特殊板块（如有需要）
-            # data = data[~data['ts_code'].str.startswith(('688', '300', '301'))]
             
-            self.stock_list = data['ts_code'].tolist()
+            # 获取当前日期
+            today = datetime.now().strftime('%Y%m%d')
+            
+            # 应用股票筛选条件
+            filtered_data = data.copy()
+            
+            # 1. 排除ST股票
+            if self.config['data'].get('stock_filters', {}).get('exclude_st', True):
+                filtered_data = filtered_data[~filtered_data['name'].str.contains('ST|退')]
+                logger.info(f"已排除ST股票，剩余{len(filtered_data)}只")
+            
+            # 2. 排除新上市股票
+            min_listing_days = self.config['data'].get('stock_filters', {}).get('min_listing_days', 60)
+            if min_listing_days > 0:
+                # 计算上市天数
+                filtered_data['listing_days'] = filtered_data['list_date'].apply(
+                    lambda x: (pd.to_datetime(today) - pd.to_datetime(x)).days
+                    if pd.notna(x) else 0
+                )
+                filtered_data = filtered_data[filtered_data['listing_days'] >= min_listing_days]
+                logger.info(f"已排除上市不足{min_listing_days}天的股票，剩余{len(filtered_data)}只")
+            
+            # 保存原始和过滤后的股票列表
+            self.all_stock_list = data['ts_code'].tolist()
+            self.stock_list = filtered_data['ts_code'].tolist()
             
             # 缓存数据到Redis
             self._save_to_redis(cache_key, self.stock_list)
             
-            logger.info(f"从Tushare获取股票列表成功，共{len(self.stock_list)}只股票")
+            logger.info(f"从Tushare获取股票列表成功，原始{len(self.all_stock_list)}只，过滤后{len(self.stock_list)}只")
         except Exception as e:
             logger.error(f"获取股票列表失败: {e}")
             raise
@@ -191,6 +215,8 @@ class DataFetcher:
                 end_date=end.replace('-', ''),
                 is_open='1'
             )
+            # 确保交易日期按升序排序（从旧到新）
+            df = df.sort_values('cal_date', ascending=True)
             self.trade_dates = df['cal_date'].tolist()
             
             # 缓存数据到Redis
@@ -380,6 +406,100 @@ class DataFetcher:
         except Exception as e:
             logger.error(f"获取股票{ts_code}基本面数据失败: {e}")
             return pd.DataFrame()
+    
+    def filter_stocks_by_fundamental(self, stock_list: List[str] = None) -> List[str]:
+        """
+        根据基本面数据筛选股票
+        
+        Args:
+            stock_list: 待筛选的股票列表，默认使用self.stock_list
+            
+        Returns:
+            筛选后的股票列表
+        """
+        if stock_list is None:
+            stock_list = self.stock_list
+        
+        if not stock_list:
+            return []
+        
+        # 获取基本面筛选参数
+        fundamental_params = self.config.get('fundamental', {})
+        min_gross_margin = fundamental_params.get('min_gross_margin', 0)
+        min_roe = fundamental_params.get('min_roe', 0)
+        min_roa = fundamental_params.get('min_roa', 0)
+        max_pe = fundamental_params.get('max_pe', float('inf'))
+        max_pb = fundamental_params.get('max_pb', float('inf'))
+        
+        logger.info(f"开始基本面筛选，条件: 毛利率>={min_gross_margin}%, ROE>={min_roe}%, ROA>={min_roa}%, PE<={max_pe}, PB<={max_pb}")
+        
+        # 批量获取基本面数据
+        filtered_stocks = []
+        batch_size = 50
+        total_stocks = len(stock_list)
+        processed = 0
+        
+        for i in range(0, total_stocks, batch_size):
+            batch = stock_list[i:i+batch_size]
+            processed += len(batch)
+            logger.info(f"正在获取基本面数据 {processed}/{total_stocks}")
+            
+            for ts_code in batch:
+                # 获取基本面数据
+                if ts_code in self.fundamental_data:
+                    df = self.fundamental_data[ts_code]
+                else:
+                    df = self.get_fundamental_data(ts_code)
+                    if not df.empty:
+                        self.fundamental_data[ts_code] = df
+                
+                if df.empty:
+                    continue
+                
+                # 检查基本面指标
+                meets_criteria = True
+                
+                # 检查毛利率
+                if 'grossprofit_margin' in df.columns and min_gross_margin > 0:
+                    gross_margin = df['grossprofit_margin'].iloc[0]
+                    if pd.isna(gross_margin) or gross_margin is None or gross_margin < min_gross_margin:
+                        meets_criteria = False
+                        logger.debug(f"股票{ts_code}毛利率不符合条件: {gross_margin if not pd.isna(gross_margin) else 'N/A'} < {min_gross_margin}")
+                
+                # 检查ROE
+                if 'roe' in df.columns and min_roe > 0:
+                    roe = df['roe'].iloc[0]
+                    if pd.isna(roe) or roe is None or roe < min_roe:
+                        meets_criteria = False
+                        logger.debug(f"股票{ts_code}ROE不符合条件: {roe if not pd.isna(roe) else 'N/A'} < {min_roe}")
+                
+                # 检查ROA
+                if 'roa' in df.columns and min_roa > 0:
+                    roa = df['roa'].iloc[0]
+                    if pd.isna(roa) or roa is None or roa < min_roa:
+                        meets_criteria = False
+                        logger.debug(f"股票{ts_code}ROA不符合条件: {roa if not pd.isna(roa) else 'N/A'} < {min_roa}")
+                
+                # 检查PE
+                if 'pe' in df.columns and max_pe < float('inf'):
+                    pe = df['pe'].iloc[0]
+                    if pd.isna(pe) or pe is None or pe > max_pe or pe <= 0:
+                        meets_criteria = False
+                        logger.debug(f"股票{ts_code}PE不符合条件: {pe if not pd.isna(pe) else 'N/A'} > {max_pe} 或 <= 0")
+                
+                # 检查PB
+                if 'pb' in df.columns and max_pb < float('inf'):
+                    pb = df['pb'].iloc[0]
+                    if pd.isna(pb) or pb is None or pb > max_pb or pb <= 0:
+                        meets_criteria = False
+                        logger.debug(f"股票{ts_code}PB不符合条件: {pb if not pd.isna(pb) else 'N/A'} > {max_pb} 或 <= 0")
+                
+                if meets_criteria:
+                    filtered_stocks.append(ts_code)
+                    logger.debug(f"股票{ts_code}通过基本面筛选")
+        
+        logger.info(f"基本面筛选完成，从{len(stock_list)}只股票中筛选出{len(filtered_stocks)}只符合条件的股票")
+        return filtered_stocks
     
     def _get_latest_quarter(self) -> str:
         """获取最近的财报季度"""

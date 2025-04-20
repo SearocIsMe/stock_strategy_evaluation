@@ -102,7 +102,8 @@ def run_backtest(config: dict, args) -> Dict:
         start_date=start_date,
         end_date=end_date,
         stock_list=stock_list,
-        verbose=args.verbose
+        verbose=args.verbose,
+        apply_fundamental_filter=True  # 应用基本面筛选
     )
     
     # 输出回测结果

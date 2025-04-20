@@ -60,8 +60,9 @@ class BacktestEngine:
             logger.error(f"配置文件加载失败: {e}")
             raise
     
-    def run_backtest(self, start_date: str = None, end_date: str = None, 
-                    stock_list: List[str] = None, verbose: bool = True) -> Dict:
+    def run_backtest(self, start_date: str = None, end_date: str = None,
+                    stock_list: List[str] = None, verbose: bool = True,
+                    apply_fundamental_filter: bool = False) -> Dict:
         """
         运行回测
         
@@ -70,6 +71,7 @@ class BacktestEngine:
             end_date: 结束日期，默认使用配置文件中的日期
             stock_list: 股票列表，默认使用所有A股
             verbose: 是否显示进度条
+            apply_fundamental_filter: 是否应用基本面筛选
             
         Returns:
             回测结果字典
@@ -90,6 +92,11 @@ class BacktestEngine:
         if stock_list is None:
             logger.info("获取A股股票列表...")
             stock_list = self.data_fetcher.get_stock_list()
+            
+            # 应用基本面筛选
+            if apply_fundamental_filter and self.config.get('fundamental'):
+                logger.info("应用基本面筛选条件...")
+                stock_list = self.data_fetcher.filter_stocks_by_fundamental(stock_list)
         
         # 获取交易日历
         logger.info("获取交易日历...")
@@ -160,7 +167,7 @@ class BacktestEngine:
             
             # 记录买入交易
             if opened:
-                buy_details = [f"{t['ts_code']}({t['price']:.2f}元)" for t in opened]
+                buy_details = [f"{t['ts_code']}({t['entry_price']:.2f}元)" for t in opened]
                 logger.info(f"日期 {date} 买入 {len(opened)} 只股票: {', '.join(buy_details)}")
             
             # 记录卖出交易并统计盈亏
@@ -259,6 +266,24 @@ class BacktestEngine:
         logger.info(f"波动率: {metrics.get('volatility', 0):.2f}%")
         logger.info(f"平均持仓天数: {metrics.get('avg_hold_days', 0):.1f}天")
         logger.info(f"平均收益率: {metrics.get('avg_profit_pct', 0):+.2f}%")
+        
+        # 显示基准指数详细信息
+        if self.config['evaluation'].get('output_benchmark_details', False):
+            logger.info("-" * 50)
+            logger.info(f"基准指数 ({self.benchmark}) 详细信息:")
+            logger.info(f"基准年化收益率: {metrics.get('benchmark_annual_return', 0):+.2f}%")
+            logger.info(f"基准夏普比率: {metrics.get('benchmark_sharpe', 0):.2f}")
+            logger.info(f"基准最大回撤: {metrics.get('benchmark_max_drawdown', 0):.2f}%")
+            logger.info(f"基准波动率: {metrics.get('benchmark_volatility', 0):.2f}%")
+            logger.info(f"相对基准胜率: {metrics.get('win_rate_vs_benchmark', 0):.2f}%")
+            logger.info(f"Alpha: {metrics.get('annual_return', 0) - metrics.get('benchmark_annual_return', 0):+.2f}%")
+            logger.info(f"Beta: {metrics.get('beta', 0):.2f}")
+            
+            # 计算相关系数
+            if not self.performance_data.empty and len(self.performance_data) > 1:
+                correlation = self.performance_data['daily_return'].corr(self.performance_data['benchmark_return'])
+                logger.info(f"与基准相关系数: {correlation:.2f}")
+        
         logger.info("=" * 50)
         
         return backtest_results
@@ -278,6 +303,9 @@ class BacktestEngine:
         """
         if benchmark_data.empty:
             return initial_value
+        
+        # 确保基准数据按日期升序排序
+        benchmark_data = benchmark_data.sort_values('trade_date', ascending=True)
         
         # 获取基准指数在回测开始日的收盘价
         start_idx = benchmark_data[benchmark_data['trade_date'] == self.start_date].index
@@ -352,6 +380,14 @@ class BacktestEngine:
         win_days = sum(daily_returns > benchmark_returns)
         win_rate = win_days / len(daily_returns) * 100 if len(daily_returns) > 0 else 0
         
+        # 计算Beta (系统风险)
+        beta = 0
+        if benchmark_volatility != 0:
+            # 计算协方差
+            covariance = daily_returns.cov(benchmark_returns)
+            # Beta = 协方差 / 基准方差
+            beta = covariance / benchmark_returns.var()
+        
         # 交易统计
         trade_metrics = self.risk_manager.get_performance_metrics()
         
@@ -368,6 +404,7 @@ class BacktestEngine:
             'max_drawdown': max_drawdown,
             'benchmark_max_drawdown': benchmark_max_drawdown,
             'win_rate_vs_benchmark': win_rate,
+            'beta': beta,
             'initial_value': initial_value,
             'final_value': final_value,
             'backtest_days': days
