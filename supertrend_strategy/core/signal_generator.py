@@ -19,18 +19,20 @@ class SignalGenerator:
     负责根据技术指标生成买入和卖出信号
     """
     
-    def __init__(self, config_path: str = 'config/strategy_params.yaml'):
+    def __init__(self, config_path: str = 'config/strategy_params.yaml', mode: str = 'backtest'):
         """
         初始化信号生成器
         
         Args:
             config_path: 配置文件路径
+            mode: 运行模式，'backtest'或'live'
         """
         # 加载配置
         self.config = self._load_config(config_path)
+        self.mode = mode
         
         # 初始化数据获取器，用于获取基本面数据
-        self.data_fetcher = DataFetcher(config_path)
+        self.data_fetcher = DataFetcher(config_path, mode=mode)
     
     def _load_config(self, config_path: str) -> dict:
         """加载配置文件"""
@@ -127,7 +129,8 @@ class SignalGenerator:
             
             # 获取基本面数据
             try:
-                fundamental_data = self.data_fetcher.get_fundamental_data(ts_code)
+                # 传递当前日期，以便在回测模式下获取正确的基本面数据
+                fundamental_data = self.data_fetcher.get_fundamental_data(ts_code, date=date)
                 if not fundamental_data.empty:
                     # 计算ROE/PB比率
                     if 'roe' in fundamental_data.columns and 'pb' in fundamental_data.columns:
