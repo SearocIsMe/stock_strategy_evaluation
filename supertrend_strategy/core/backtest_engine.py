@@ -3,6 +3,8 @@ import numpy as np
 import logging
 import yaml
 import time
+import os
+import csv
 from typing import Dict, List, Tuple, Union, Optional
 from datetime import datetime, timedelta
 from tqdm import tqdm
@@ -311,6 +313,16 @@ class BacktestEngine:
         
         logger.info("=" * 50)
         
+        # 输出每日交易记录到CSV文件
+        if self.config.get('output_daily_records', True):
+            # 生成包含日期范围的文件名
+            strategy_id = self.config.get('active_strategy', 'default')
+            filename = f"daily_records_{strategy_id}_{self.start_date}_to_{self.end_date}.csv"
+            custom_path = os.path.join('results', strategy_id, 'csv', filename)
+            
+            csv_path = self.export_daily_records_to_csv(custom_path)
+            logger.info(f"每日交易记录已导出至: {csv_path}")
+            
         return backtest_results
     
     def _calculate_benchmark_value(self, benchmark_data: pd.DataFrame, date: str, 
@@ -550,3 +562,206 @@ class BacktestEngine:
         worst_trades = sell_trades.sort_values('profit_pct', ascending=True).head(n)
         
         return worst_trades
+        
+    def export_daily_records_to_csv(self, custom_path: str = None) -> str:
+        """
+        将每日交易记录导出到CSV文件
+        
+        该函数处理回测期间的每日交易和持仓数据，生成详细的CSV记录。
+        对于每个交易日，记录包括:
+        1. 当日发生的所有交易（买入/卖出）
+        2. 当日的所有持仓状态
+        3. 如果当日没有交易和持仓，则添加一条空记录
+        
+        Args:
+            custom_path: 自定义CSV文件保存路径，如果不提供则使用默认路径
+                         (results/{strategy}/csv/daily_records_{timestamp}.csv)
+        
+        输出列:
+        - 日期
+        - 股票代码
+        - 平仓/开仓状态
+        - 股票数量
+        - 成交价格
+        - 股票持仓金额
+        - 持仓百分比
+        - 持仓比例状态(标记持仓比例异常情况：低于最小比例为"持仓不足"，超过最大比例为"超额持仓")
+        - 现金余额
+        - 账户余额
+        
+        Returns:
+            CSV文件路径
+        """
+        # 创建结果目录
+        results_dir = os.path.join('results', self.config.get('active_strategy', 'default'))
+        os.makedirs(results_dir, exist_ok=True)
+        
+        # 创建CSV专用目录
+        csv_dir = os.path.join(results_dir, 'csv')
+        os.makedirs(csv_dir, exist_ok=True)
+        
+        # 生成文件路径
+        if custom_path:
+            # 确保自定义路径的目录存在
+            custom_dir = os.path.dirname(custom_path)
+            if custom_dir:
+                os.makedirs(custom_dir, exist_ok=True)
+            csv_path = custom_path
+        else:
+            # 使用默认路径
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            csv_path = os.path.join(csv_dir, f'daily_records_{timestamp}.csv')
+        
+        # 获取所有交易日期
+        all_dates = sorted(list(self.daily_positions.keys()))
+        
+        # 准备CSV数据
+        records = []
+        
+        # 遍历每个交易日
+        for date in all_dates:
+            # 获取当日持仓
+            positions = self.daily_positions.get(date, {})
+            
+            # 获取当日交易
+            day_trades = [t for t in self.risk_manager.trades if t['date'] == date]
+            
+            # 获取当日绩效数据
+            day_perf = self.performance_data[self.performance_data['date'] == date]
+            cash = day_perf['cash'].values[0] if not day_perf.empty else 0
+            portfolio_value = day_perf['portfolio_value'].values[0] if not day_perf.empty else 0
+            
+            # 如果当日有交易，记录每笔交易
+            if day_trades:
+                for trade in day_trades:
+                    ts_code = trade['ts_code']
+                    # 更明确的交易状态描述
+                    if trade['type'] == 'sell':
+                        trade_type = '平仓'
+                    else:
+                        trade_type = '开仓'
+                    shares = trade['shares']
+                    price = trade['price']
+                    value = trade['value']
+                    
+                    # 计算持仓百分比
+                    position_pct = (value / portfolio_value * 100) if portfolio_value > 0 else 0
+                    
+                    # 获取配置的最大和最小持仓比例
+                    max_position_ratio = self.config['evaluation']['position_limits'].get('max_position_ratio', 0.20) * 100
+                    min_position_ratio = self.config['evaluation']['position_limits'].get('min_position_ratio', 0.05) * 100
+                    
+                    # 计算当前持仓比例
+                    position_ratio = (value / portfolio_value * 100) if portfolio_value > 0 else 0
+                    
+                    # 判断持仓状态
+                    if position_ratio > max_position_ratio:
+                        position_status = '超额持仓'
+                    elif position_ratio < min_position_ratio:
+                        position_status = '持仓不足'
+                    else:
+                        position_status = ''
+                    
+                    # 添加记录
+                    # Format date if needed (YYYYMMDD -> YYYY-MM-DD)
+                    formatted_date = date
+                    if len(date) == 8 and date.isdigit():
+                        formatted_date = f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+                        
+                    records.append([
+                        formatted_date,
+                        ts_code,
+                        trade_type,
+                        f"{shares:,}",  # 添加千位分隔符
+                        f"{price:.2f}",  # 保留两位小数
+                        f"{value:.2f}",
+                        f"{position_pct:.2f}%",
+                        position_status,
+                        f"{cash:.2f}",
+                        f"{portfolio_value:.2f}"
+                    ])
+            else:
+                # 如果当日没有交易，为每个持仓添加一条记录
+                if isinstance(positions, pd.DataFrame) and not positions.empty:
+                    for _, pos_data in positions.iterrows():
+                        ts_code = pos_data.get('ts_code', '')
+                        shares = pos_data.get('shares', 0)
+                        entry_price = pos_data.get('entry_price', 0)
+                        position_value = pos_data.get('capital', 0)
+                        
+                        # 计算持仓百分比
+                        position_pct = (position_value / portfolio_value * 100) if portfolio_value > 0 else 0
+                        
+                        # 获取配置的最大和最小持仓比例
+                        max_position_ratio = self.config['evaluation']['position_limits'].get('max_position_ratio', 0.20) * 100
+                        min_position_ratio = self.config['evaluation']['position_limits'].get('min_position_ratio', 0.05) * 100
+                        
+                        # 计算当前持仓比例
+                        position_ratio = (position_value / portfolio_value * 100) if portfolio_value > 0 else 0
+                        
+                        # 判断持仓状态
+                        if position_ratio > max_position_ratio:
+                            position_status = '超额持仓'
+                        elif position_ratio < min_position_ratio:
+                            position_status = '持仓不足'
+                        else:
+                            position_status = ''
+                        
+                        # 添加记录
+                        # Format date if needed (YYYYMMDD -> YYYY-MM-DD)
+                        formatted_date = date
+                        if len(date) == 8 and date.isdigit():
+                            formatted_date = f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+                            
+                        records.append([
+                            formatted_date,
+                            ts_code,
+                            '持仓',
+                            f"{shares:,}",  # 添加千位分隔符
+                            f"{entry_price:.2f}",  # 保留两位小数
+                            f"{position_value:.2f}",
+                            f"{position_pct:.2f}%",
+                            position_status,
+                            f"{cash:.2f}",
+                            f"{portfolio_value:.2f}"
+                        ])
+                
+                # 如果当日没有持仓或持仓为空，添加一条空记录
+                if (isinstance(positions, pd.DataFrame) and positions.empty) or not isinstance(positions, pd.DataFrame) or not positions:
+                    # Format date if needed (YYYYMMDD -> YYYY-MM-DD)
+                    formatted_date = date
+                    if len(date) == 8 and date.isdigit():
+                        formatted_date = f"{date[:4]}-{date[4:6]}-{date[6:8]}"
+                        
+                    records.append([
+                        formatted_date,
+                        '',  # 空仓没有持仓状态
+                        '',
+                        "0",
+                        "0.00",
+                        "0.00",
+                        '0.00%',
+                        '',
+                        f"{cash:.2f}",
+                        f"{portfolio_value:.2f}"
+                    ])
+        
+        # 确保记录按日期排序
+        records.sort(key=lambda x: x[0])
+        
+        # 写入CSV文件
+        # 确保CSV文件使用UTF-8编码，以正确显示中文字符
+        with open(csv_path, 'w', newline='', encoding='utf-8-sig') as f:
+            writer = csv.writer(f)
+            # 写入表头
+            writer.writerow([
+                '日期', '股票代码', '交易状态', '股票数量', '成交价格',
+                '股票持仓金额', '持仓百分比', '持仓比例状态', '现金余额', '账户余额'
+                # 持仓比例状态: 空白=正常, 持仓不足=低于最小比例, 超额持仓=超过最大比例
+            ])
+            # 写入数据
+            writer.writerows(records)
+            
+        logger.info(f"已写入{len(records)}条交易记录到CSV文件")
+        
+        return csv_path

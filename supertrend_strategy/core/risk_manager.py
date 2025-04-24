@@ -90,16 +90,29 @@ class RiskManager:
         if num_positions <= 0:
             return 0
         
+        # 获取最小持仓比例配置
+        min_position_ratio = self.config['evaluation']['position_limits'].get('min_position_ratio', 0.05)
+        
+        # 计算总资产价值
+        total_portfolio_value = self.current_capital
+        
+        # 计算最小仓位大小 (总资产的最小比例)
+        min_position_size = total_portfolio_value * min_position_ratio
+        
+        # 计算平均分配的仓位大小
         if self.position_sizing_method == 'equal':
             # 等权分配
-            return available_capital / num_positions
+            avg_position_size = available_capital / num_positions
         elif self.position_sizing_method == 'dynamic':
             # 动态分配 (基于波动率或其他因素)
             # 这里简化为等权分配，实际可以基于波动率或其他因素调整
-            return available_capital / num_positions
+            avg_position_size = available_capital / num_positions
         else:
             # 默认等权分配
-            return available_capital / num_positions
+            avg_position_size = available_capital / num_positions
+        
+        # 返回较大的值，确保仓位不小于最小比例
+        return max(avg_position_size, min_position_size)
     
     def open_position(self, ts_code: str, price: float, date: str, 
                      available_capital: float = None) -> Dict:
@@ -148,6 +161,15 @@ class RiskManager:
         # 计算实际使用资金
         actual_capital = shares * price
         
+        # 检查是否满足最小持仓比例要求
+        min_position_ratio = self.config['evaluation']['position_limits'].get('min_position_ratio', 0.05)
+        total_portfolio_value = self.current_capital
+        min_position_size = total_portfolio_value * min_position_ratio
+        
+        if actual_capital < min_position_size:
+            logger.warning(f"股票{ts_code}的持仓金额{actual_capital:.2f}元低于最小持仓比例要求({min_position_ratio*100:.1f}%，即{min_position_size:.2f}元)")
+            # 我们仍然允许开仓，但会在CSV中标记为"持仓不足"
+        
         # 记录持仓信息
         position = {
             'ts_code': ts_code,
@@ -169,7 +191,7 @@ class RiskManager:
             'price': price,
             'shares': shares,
             'value': actual_capital,
-            'commission': self._calculate_commission(actual_capital)
+            'commission': self._calculate_commission(actual_capital, is_sell=False)
         }
         self.trades.append(trade)
         
@@ -212,7 +234,7 @@ class RiskManager:
             'price': price,
             'shares': position['shares'],
             'value': close_value,
-            'commission': self._calculate_commission(close_value),
+            'commission': self._calculate_commission(close_value, is_sell=True),
             'profit': profit,
             'profit_pct': profit_pct,
             'hold_days': self._calculate_hold_days(position['entry_date'], date),
@@ -229,26 +251,32 @@ class RiskManager:
         logger.info(f"平仓: {ts_code}, 价格: {price}, 收益: {profit:.2f} ({profit_pct:.2f}%), 原因: {reason}")
         return trade
     
-    def _calculate_commission(self, value: float) -> float:
+    def _calculate_commission(self, value: float, is_sell: bool = False) -> float:
         """
         计算交易手续费
         
         Args:
             value: 交易金额
+            is_sell: 是否为卖出交易
             
         Returns:
             手续费
         """
-        # 佣金费率 (万分之2.5)
-        commission_rate = 0.00025
-        # 印花税 (卖出时千分之1)
-        stamp_duty_rate = 0.001
+        # 从配置中获取费率
+        commission_rate = self.config['evaluation']['transaction_costs'].get('commission_rate', 0.00025)
+        stamp_duty_rate = self.config['evaluation']['transaction_costs'].get('stamp_duty_rate', 0.001)
+        min_commission = self.config['evaluation']['transaction_costs'].get('min_commission', 5.0)
         
-        # 简化计算，这里只考虑佣金
+        # 计算佣金
         commission = value * commission_rate
         
-        # 最低佣金5元
-        commission = max(commission, 5)
+        # 最低佣金
+        commission = max(commission, min_commission)
+        
+        # 如果是卖出交易，加上印花税
+        if is_sell:
+            stamp_duty = value * stamp_duty_rate
+            commission += stamp_duty
         
         return commission
     

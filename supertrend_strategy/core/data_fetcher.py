@@ -820,7 +820,7 @@ class DataFetcher:
         )
         
         # 记录日志
-        logger.info(f"筹码集中度计算完成，阈值: {threshold}%")
+        logger.debug(f"筹码集中度计算完成，阈值: {threshold}%")
     
     def _calculate_rsi(self, df: pd.DataFrame) -> None:
         """计算RSI指标"""
