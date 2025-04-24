@@ -36,7 +36,9 @@ if is_wsl:
 # 全局变量，用于存储是否使用英文标签
 USE_ENGLISH_LABELS = True
 
-# 空行，移除全局字体设置代码
+# 设置全局字体，解决WSL环境下的字体问题
+# 使用更通用的字体，确保数字和特殊字符能正确显示
+matplotlib.rcParams['font.family'] = 'DejaVu Sans'
 
 class Plotter:
     """
@@ -81,14 +83,17 @@ class Plotter:
         except Exception:
             return False
     
-    def __init__(self, output_dir: str = 'results'):
+    def __init__(self, output_dir: str = 'results', mode: str = 'backtest'):
         """
         初始化绘图工具
         
         Args:
             output_dir: 输出目录
+            mode: 运行模式，'backtest'或'live'
         """
         self.output_dir = output_dir
+        self.mode = mode
+        logger.info(f"绘图工具初始化，运行模式: {mode}")
         
         # 创建输出目录
         os.makedirs(output_dir, exist_ok=True)
@@ -106,58 +111,67 @@ class Plotter:
         
         try:
             # 尝试多种支持中文的字体，按优先级排序
-            cjk_fonts = ['SimHei', 'Microsoft YaHei', 'WenQuanYi Micro Hei', 'Noto Sans CJK SC', 'Noto Sans CJK JP',
-                         'Droid Sans Fallback', 'Arial Unicode MS', 'DejaVu Sans']
+            # 添加更多可能在WSL环境中可用的字体
+            cjk_fonts = ['DejaVu Sans', 'Liberation Sans', 'FreeSans', 'Noto Sans', 'SimHei',
+                         'Microsoft YaHei', 'WenQuanYi Micro Hei', 'Noto Sans CJK SC', 'Noto Sans CJK JP',
+                         'Droid Sans Fallback', 'Arial Unicode MS']
             
             # 检查matplotlib可用的字体
             from matplotlib.font_manager import fontManager, FontProperties
             available_fonts = [f.name for f in fontManager.ttflist]
             
+            logger.info(f"Available fonts: {', '.join(available_fonts[:10])}...")
+            
             # 找到第一个可用的CJK字体
             font_found = False
             for font in cjk_fonts:
-                if font in available_fonts and self.check_font_for_chinese(font):
+                if font in available_fonts:
+                    # 设置全局字体
                     plt.rcParams['font.sans-serif'] = [font] + plt.rcParams['font.sans-serif']
+                    plt.rcParams['font.family'] = 'sans-serif'
                     font_found = True
-                    logger.info(f"使用字体 '{font}' 显示中文字符")
+                    logger.info(f"使用字体 '{font}' 显示字符")
+                    
+                    # 测试这个字体是否支持中文
+                    if self.check_font_for_chinese(font):
+                        logger.info(f"字体 '{font}' 支持中文字符")
+                        USE_ENGLISH_LABELS = False
+                    else:
+                        logger.info(f"字体 '{font}' 不支持中文字符，将使用英文标签")
+                        USE_ENGLISH_LABELS = True
                     break
             
-            # 默认使用英文标签，除非明确找到了支持所有测试字符的中文字体
-            USE_ENGLISH_LABELS = True
-            
-            if font_found:
-                # 即使找到了字体，也进行额外测试确保它能渲染所有需要的字符
-                try:
-                    # 创建一个临时图形来测试更多字符
-                    fig = plt.figure(figsize=(1, 1))
-                    ax = fig.add_subplot(111)
-                    
-                    # 测试更多可能出现的中文字符
-                    test_text = "投资回撤分析交易策略收益率"
-                    font_prop = FontProperties(family=plt.rcParams['font.sans-serif'][0])
-                    ax.text(0.5, 0.5, test_text, fontproperties=font_prop)
-                    
-                    # 渲染到内存
-                    fig.canvas.draw()
-                    plt.close(fig)
-                    
-                    # 如果没有抛出异常，可以使用中文标签
-                    USE_ENGLISH_LABELS = False
-                    logger.info("中文字体测试通过，将使用中文标签")
-                except Exception as e:
-                    logger.warning(f"中文字体测试失败: {e}，将使用英文标签")
-            else:
-                # 如果没有找到理想的字体，尝试使用系统默认字体
+            if not font_found:
+                # 如果没有找到理想的字体，使用系统默认字体
                 plt.rcParams['font.sans-serif'] = ['sans-serif']
-                logger.warning("未找到支持中文的字体，将使用英文标签")
+                plt.rcParams['font.family'] = 'sans-serif'
+                logger.warning("未找到支持的字体，将使用系统默认字体和英文标签")
+                USE_ENGLISH_LABELS = True
             
-            plt.rcParams['axes.unicode_minus'] = False    # 用来正常显示负号
+            # 确保可以正确显示负号
+            plt.rcParams['axes.unicode_minus'] = False
             
-            # 额外设置，确保字体可以正确渲染
-            plt.rcParams['font.family'] = 'sans-serif'
-            
+            # 测试数字和特殊字符的渲染
+            try:
+                # 创建一个临时图形来测试数字和特殊字符
+                fig = plt.figure(figsize=(1, 1))
+                ax = fig.add_subplot(111)
+                
+                # 测试数字和特殊字符
+                test_text = "1234567890%"
+                ax.text(0.5, 0.5, test_text)
+                
+                # 渲染到内存
+                fig.canvas.draw()
+                plt.close(fig)
+                
+                logger.info("数字和特殊字符测试通过")
+            except Exception as e:
+                logger.warning(f"数字和特殊字符测试失败: {e}")
+                
         except Exception as e:
-            logger.warning(f"设置中文字体时出错: {e}，将使用英文标签")
+            logger.warning(f"设置字体时出错: {e}，将使用系统默认字体和英文标签")
+            plt.rcParams['font.family'] = 'sans-serif'
             USE_ENGLISH_LABELS = True
     
     def plot_portfolio_performance(self, daily_performance: pd.DataFrame, 
@@ -786,7 +800,7 @@ class Plotter:
                                   title: str = None,
                                   save_path: str = None) -> plt.Figure:
         """
-        绘制策略与基准收益率对比直方图
+        绘制策略与基准收益率对比直方图和收益分布
         
         Args:
             daily_performance: 每日表现DataFrame
@@ -801,15 +815,21 @@ class Plotter:
             default_title = 'Strategy vs Benchmark Performance'
             empty_data_warning = "Cannot plot performance comparison: data is empty"
             strategy_label = "Strategy"
-            benchmark_label = "Benchmark"
+            benchmark_label = "Benchmark (000300.SH)"  # 明确标注基准指数
             return_label = "Return (%)"
+            profit_dist_title = "Profit Distribution"
+            daily_return_label = "Daily Return (%)"
+            frequency_label = "Frequency"
             save_message = f"Performance comparison chart saved to: {save_path}"
         else:
             default_title = '策略与基准收益率对比'
             empty_data_warning = "无法绘制收益率对比图：数据为空"
             strategy_label = "策略"
-            benchmark_label = "基准"
+            benchmark_label = "基准 (000300.SH)"  # 明确标注基准指数
             return_label = "收益率 (%)"
+            profit_dist_title = "收益分布"
+            daily_return_label = "日收益率 (%)"
+            frequency_label = "频率"
             save_message = f"收益率对比图已保存至: {save_path}"
             
         # 使用提供的标题或默认标题
@@ -829,8 +849,11 @@ class Plotter:
             benchmark_final = daily_performance['benchmark_value'].iloc[-1]
             benchmark_return = (benchmark_final / benchmark_initial - 1) * 100
             
-            # 创建图表
-            fig, ax = plt.subplots(figsize=(10, 6))
+            # 创建图表 - 2行1列的布局
+            fig, axes = plt.subplots(2, 1, figsize=(12, 12), gridspec_kw={'height_ratios': [1, 1.5]})
+            
+            # 1. 总收益率对比 - 上方图表
+            ax1 = axes[0]
             
             # 创建数据
             returns = [total_return, benchmark_return]
@@ -838,26 +861,50 @@ class Plotter:
             colors = ['green' if r > 0 else 'red' for r in returns]
             
             # 绘制条形图
-            bars = ax.bar(labels, returns, color=colors)
+            bars = ax1.bar(labels, returns, color=colors)
             
             # 添加数值标签
             for bar in bars:
                 height = bar.get_height()
-                ax.annotate(f'{height:.2f}%',
+                ax1.annotate(f'{height:.2f}%',
                           xy=(bar.get_x() + bar.get_width() / 2, height),
                           xytext=(0, 3),  # 3 points vertical offset
                           textcoords="offset points",
                           ha='center', va='bottom')
             
             # 添加标题和标签
-            ax.set_title(title, fontsize=15)
-            ax.set_ylabel(return_label, fontsize=12)
+            ax1.set_title(title, fontsize=15)
+            ax1.set_ylabel(return_label, fontsize=12)
             
             # 添加网格
-            ax.grid(True, alpha=0.3, axis='y')
+            ax1.grid(True, alpha=0.3, axis='y')
             
             # 添加零线
-            ax.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+            ax1.axhline(y=0, color='black', linestyle='-', alpha=0.3)
+            
+            # 2. 收益分布直方图 - 下方图表
+            ax2 = axes[1]
+            
+            # 将日收益率转换为百分比
+            strategy_returns = daily_performance['daily_return'] * 100
+            benchmark_returns = daily_performance['benchmark_return'] * 100
+            
+            # 绘制策略收益分布
+            sns.histplot(strategy_returns, bins=30, kde=True, ax=ax2,
+                        color='blue', alpha=0.5, label=strategy_label)
+            
+            # 绘制基准收益分布
+            sns.histplot(benchmark_returns, bins=30, kde=True, ax=ax2,
+                        color='orange', alpha=0.5, label=benchmark_label)
+            
+            # 添加零线
+            ax2.axvline(x=0, color='black', linestyle='--', alpha=0.7)
+            
+            # 添加标题和标签
+            ax2.set_title(profit_dist_title, fontsize=15)
+            ax2.set_xlabel(daily_return_label, fontsize=12)
+            ax2.set_ylabel(frequency_label, fontsize=12)
+            ax2.legend()
             
             # 调整布局
             plt.tight_layout()
@@ -882,23 +929,41 @@ class Plotter:
         Returns:
             报告保存路径
         """
-        # 根据字体支持情况选择中文或英文标签
+        # 根据运行模式和字体支持情况选择标签
         if 'USE_ENGLISH_LABELS' in globals() and USE_ENGLISH_LABELS:
-            empty_data_warning = "Cannot generate backtest report: data is empty"
-            portfolio_title = "Portfolio Performance"
-            drawdown_title = "Drawdown Analysis"
-            comparison_title = "Strategy vs Benchmark Comparison"
-            trade_title = "Trade Analysis"
-            metrics_title = "Performance Metrics"
-            report_message = f"Backtest report generated to directory: {output_dir}"
+            if self.mode == 'backtest':
+                empty_data_warning = "Cannot generate backtest report: data is empty"
+                portfolio_title = "Portfolio Performance (Backtest)"
+                drawdown_title = "Drawdown Analysis (Backtest)"
+                comparison_title = "Strategy vs Benchmark Comparison (Backtest)"
+                trade_title = "Trade Analysis (Backtest)"
+                metrics_title = "Performance Metrics (Backtest)"
+                report_message = f"Backtest report generated to directory: {output_dir}"
+            else:  # live mode
+                empty_data_warning = "Cannot generate live trading report: data is empty"
+                portfolio_title = "Portfolio Performance (Live)"
+                drawdown_title = "Drawdown Analysis (Live)"
+                comparison_title = "Strategy vs Benchmark Comparison (Live)"
+                trade_title = "Trade Analysis (Live)"
+                metrics_title = "Performance Metrics (Live)"
+                report_message = f"Live trading report generated to directory: {output_dir}"
         else:
-            empty_data_warning = "无法生成回测报告：数据为空"
-            portfolio_title = "投资组合表现"
-            drawdown_title = "回撤分析"
-            comparison_title = "策略与基准收益率对比"
-            trade_title = "交易分析"
-            metrics_title = "绩效指标"
-            report_message = f"回测报告已生成至目录: {output_dir}"
+            if self.mode == 'backtest':
+                empty_data_warning = "无法生成回测报告：数据为空"
+                portfolio_title = "投资组合表现 (回测)"
+                drawdown_title = "回撤分析 (回测)"
+                comparison_title = "策略与基准收益率对比 (回测)"
+                trade_title = "交易分析 (回测)"
+                metrics_title = "绩效指标 (回测)"
+                report_message = f"回测报告已生成至目录: {output_dir}"
+            else:  # live mode
+                empty_data_warning = "无法生成实盘报告：数据为空"
+                portfolio_title = "投资组合表现 (实盘)"
+                drawdown_title = "回撤分析 (实盘)"
+                comparison_title = "策略与基准收益率对比 (实盘)"
+                trade_title = "交易分析 (实盘)"
+                metrics_title = "绩效指标 (实盘)"
+                report_message = f"实盘报告已生成至目录: {output_dir}"
             
         if not backtest_results:
             logger.warning(empty_data_warning)
@@ -912,7 +977,19 @@ class Plotter:
         os.makedirs(output_dir, exist_ok=True)
         
         # 生成时间戳
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+        if self.mode == 'backtest':
+            # 回测模式：使用回测结束日期作为时间戳前缀
+            if 'backtest_days' in backtest_results.get('performance_metrics', {}):
+                # 如果有回测天数信息，使用回测结束日期
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                timestamp_prefix = f"backtest_{timestamp}"
+            else:
+                timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+                timestamp_prefix = f"backtest_{timestamp}"
+        else:
+            # 实盘模式：使用当前时间作为时间戳
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            timestamp_prefix = f"live_{timestamp}"
         
         # 提取数据
         metrics = backtest_results.get('performance_metrics', {})
@@ -925,21 +1002,21 @@ class Plotter:
             self.plot_portfolio_performance(
                 daily_performance,
                 title=portfolio_title,
-                save_path=os.path.join(output_dir, f'portfolio_performance_{timestamp}.png')
+                save_path=os.path.join(output_dir, f'portfolio_performance_{timestamp_prefix}.png')
             )
             
-            # 绘制策略与基准收益率对比图
+            # 绘制策略与基准收益率对比图（包含收益分布直方图）
             self.plot_performance_comparison(
                 daily_performance,
                 title=comparison_title,
-                save_path=os.path.join(output_dir, f'performance_comparison_{timestamp}.png')
+                save_path=os.path.join(output_dir, f'performance_comparison_{timestamp_prefix}.png')
             )
             
             # 绘制回撤图
             self.plot_drawdown(
                 daily_performance,
                 title=drawdown_title,
-                save_path=os.path.join(output_dir, f'drawdown_{timestamp}.png')
+                save_path=os.path.join(output_dir, f'drawdown_{timestamp_prefix}.png')
             )
         
         if not trade_summary.empty:
@@ -947,7 +1024,7 @@ class Plotter:
             self.plot_trade_analysis(
                 trade_summary,
                 title=trade_title,
-                save_path=os.path.join(output_dir, f'trade_analysis_{timestamp}.png')
+                save_path=os.path.join(output_dir, f'trade_analysis_{timestamp_prefix}.png')
             )
         
         # 绘制绩效指标图
@@ -955,7 +1032,7 @@ class Plotter:
             self.plot_performance_metrics(
                 metrics,
                 title=metrics_title,
-                save_path=os.path.join(output_dir, f'performance_metrics_{timestamp}.png')
+                save_path=os.path.join(output_dir, f'performance_metrics_{timestamp_prefix}.png')
             )
         
         logger.info(report_message)

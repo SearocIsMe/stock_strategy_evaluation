@@ -8,6 +8,7 @@ import warnings
 import redis
 import json
 import pickle
+import traceback
 from datetime import datetime, timedelta
 from typing import Dict, List, Tuple, Union, Optional
 
@@ -27,15 +28,20 @@ class DataFetcher:
     负责从tushare获取A股数据并计算技术指标
     """
     
-    def __init__(self, config_path: str = 'config/strategy_params.yaml'):
+    def __init__(self, config_path: str = 'config/strategy_params.yaml', mode: str = 'backtest'):
         """
         初始化数据获取器
         
         Args:
             config_path: 配置文件路径
+            mode: 运行模式，'backtest'或'live'
         """
         # 加载配置
         self.config = self._load_config(config_path)
+        
+        # 设置运行模式
+        self.mode = mode
+        logger.info(f"数据获取器初始化，运行模式: {mode}")
         
         # 初始化tushare
         self._init_tushare()
@@ -49,6 +55,12 @@ class DataFetcher:
         self.all_stock_list = []   # 未过滤的股票列表缓存
         self.trade_dates = []      # 交易日期缓存
         self.fundamental_data = {} # 基本面数据缓存
+        
+        # 回测模式下的日期范围
+        if self.mode == 'backtest':
+            self.start_date = self.config['data']['start_date']
+            self.end_date = self.config['data']['end_date']
+            logger.info(f"回测模式，日期范围: {self.start_date} 至 {self.end_date}")
         
     def _load_config(self, config_path: str) -> dict:
         """加载配置文件"""
@@ -369,21 +381,33 @@ class DataFetcher:
             logger.error(f"获取股票{ts_code}数据失败: {e}")
             return pd.DataFrame()
     
-    def get_fundamental_data(self, ts_code: str, refresh: bool = False) -> pd.DataFrame:
+    def get_fundamental_data(self, ts_code: str, refresh: bool = False, date: str = None) -> pd.DataFrame:
         """
         获取股票基本面数据
         
         Args:
             ts_code: 股票代码（tushare格式）
             refresh: 是否强制刷新缓存
+            date: 指定日期，回测模式下使用
             
         Returns:
             基本面数据DataFrame
         """
+        # 根据模式确定日期
+        if self.mode == 'backtest':
+            # 回测模式：使用指定日期或回测结束日期
+            ref_date = date or self.end_date
+            ref_date_obj = datetime.strptime(ref_date.replace('-', ''), '%Y%m%d')
+            quarter = self._get_quarter_for_date(ref_date_obj)
+            logger.debug(f"回测模式，使用日期: {ref_date}, 季度: {quarter}")
+        else:
+            # 实盘模式：使用当前日期
+            ref_date = datetime.now().strftime('%Y-%m-%d')
+            quarter = self._get_latest_quarter()
+            logger.debug(f"实盘模式，使用当前日期: {ref_date}, 季度: {quarter}")
+        
         # 生成缓存键
-        today = datetime.now().strftime('%Y-%m-%d')
-        quarter = self._get_latest_quarter()
-        cache_key = f"fundamental:{ts_code}:{today}:{quarter}"
+        cache_key = f"fundamental:{ts_code}:{ref_date}:{quarter}"
         
         # 如果不强制刷新，检查Redis缓存
         if not refresh:
@@ -393,47 +417,135 @@ class DataFetcher:
                 return redis_data
         
         try:
-            # 从Tushare获取最新财务指标
-            logger.debug(f"Redis缓存未命中，从Tushare获取股票{ts_code}基本面数据")
-            df_basic = self.pro.daily_basic(
-                ts_code=ts_code,
-                trade_date=datetime.now().strftime('%Y%m%d'),
-                fields='ts_code,trade_date,turnover_rate,turnover_rate_f,volume_ratio,pe,pb,ps,dv_ratio,total_mv,circ_mv'
-            )
+            # 根据模式获取交易日期
+            if self.mode == 'backtest':
+                # 回测模式：使用指定日期或回测结束日期的最近交易日
+                if date:
+                    trade_date = self._get_nearest_trade_date(date)
+                else:
+                    trade_date = self._get_nearest_trade_date(self.end_date)
+                logger.debug(f"回测模式，使用交易日期: {trade_date}")
+            else:
+                # 实盘模式：使用最近的交易日期
+                trade_date = self._get_recent_trade_date()
+                logger.debug(f"实盘模式，使用最近交易日期: {trade_date}")
             
-            # 获取最新财务报表
-            df_finance = self.pro.fina_indicator(
-                ts_code=ts_code,
-                period=quarter,
-                fields='ts_code,ann_date,end_date,grossprofit_margin,netprofit_margin,roe,roa'
-            )
+            logger.debug(f"Redis缓存未命中，从Tushare获取股票{ts_code}基本面数据，使用交易日期: {trade_date}")
+            
+            # 从Tushare获取财务指标
+            df_basic = None
+            try:
+                if self.mode == 'backtest':
+                    # 回测模式：使用回测日期的财务指标
+                    logger.debug(f"回测模式，获取{trade_date}的财务指标")
+                    df_basic = self.pro.daily_basic(
+                        ts_code=ts_code,
+                        trade_date=trade_date,
+                        fields='ts_code,trade_date,turnover_rate,turnover_rate_f,volume_ratio,pe,pb,ps,dv_ratio,total_mv,circ_mv'
+                    )
+                    logger.debug(f"获取daily_basic数据(日期={trade_date}): {len(df_basic) if df_basic is not None else 0}行")
+                else:
+                    # 实盘模式：使用最近交易日的财务指标
+                    df_basic = self.pro.daily_basic(
+                        ts_code=ts_code,
+                        trade_date=trade_date,
+                        fields='ts_code,trade_date,turnover_rate,turnover_rate_f,volume_ratio,pe,pb,ps,dv_ratio,total_mv,circ_mv'
+                    )
+                    logger.debug(f"获取daily_basic数据(日期={trade_date}): {len(df_basic) if df_basic is not None else 0}行")
+            except Exception as e:
+                logger.error(f"获取daily_basic数据失败: {e}")
+                df_basic = pd.DataFrame()
+            
+            # 获取财务报表
+            df_finance = None
+            try:
+                if self.mode == 'backtest':
+                    # 回测模式：只获取在回测日期前已经公布的财务数据
+                    # 使用ann_date_lte参数确保只获取在指定日期前已公布的财务数据
+                    logger.debug(f"回测模式，获取{trade_date}前已公布的财务数据")
+                    
+                    # 尝试获取最新季度的财务数据
+                    df_finance = self.pro.fina_indicator(
+                        ts_code=ts_code,
+                        period=quarter,
+                        ann_date_lte=trade_date,  # 只获取在回测日期前已公布的数据
+                        fields='ts_code,ann_date,end_date,grossprofit_margin,netprofit_margin,roe,roa'
+                    )
+                    logger.debug(f"获取fina_indicator数据(季度={quarter}, 公布日期<={trade_date}): {len(df_finance) if df_finance is not None else 0}行")
+                    
+                    # 如果最新季度没有数据，尝试获取上一季度的数据
+                    if df_finance is None or df_finance.empty:
+                        prev_quarter = self._get_previous_quarter(quarter)
+                        logger.debug(f"最新季度{quarter}无数据，尝试获取上一季度{prev_quarter}数据")
+                        df_finance = self.pro.fina_indicator(
+                            ts_code=ts_code,
+                            period=prev_quarter,
+                            ann_date_lte=trade_date,  # 只获取在回测日期前已公布的数据
+                            fields='ts_code,ann_date,end_date,grossprofit_margin,netprofit_margin,roe,roa'
+                        )
+                        logger.debug(f"获取fina_indicator数据(季度={prev_quarter}, 公布日期<={trade_date}): {len(df_finance) if df_finance is not None else 0}行")
+                else:
+                    # 实盘模式：获取最新的财务数据
+                    # 尝试获取最新季度的财务数据
+                    df_finance = self.pro.fina_indicator(
+                        ts_code=ts_code,
+                        period=quarter,
+                        fields='ts_code,ann_date,end_date,grossprofit_margin,netprofit_margin,roe,roa'
+                    )
+                    logger.debug(f"获取fina_indicator数据(季度={quarter}): {len(df_finance) if df_finance is not None else 0}行")
+                    
+                    # 如果最新季度没有数据，尝试获取上一季度的数据
+                    if df_finance is None or df_finance.empty:
+                        prev_quarter = self._get_previous_quarter(quarter)
+                        logger.debug(f"最新季度{quarter}无数据，尝试获取上一季度{prev_quarter}数据")
+                        df_finance = self.pro.fina_indicator(
+                            ts_code=ts_code,
+                            period=prev_quarter,
+                            fields='ts_code,ann_date,end_date,grossprofit_margin,netprofit_margin,roe,roa'
+                        )
+                        logger.debug(f"获取fina_indicator数据(季度={prev_quarter}): {len(df_finance) if df_finance is not None else 0}行")
+            except Exception as e:
+                logger.error(f"获取fina_indicator数据失败: {e}")
+                df_finance = pd.DataFrame()
             
             # 合并数据
             result = pd.DataFrame()
-            if not df_basic.empty and not df_finance.empty:
+            if df_basic is not None and df_finance is not None and not df_basic.empty and not df_finance.empty:
+                # 两个数据源都有数据，合并它们
                 result = pd.merge(df_basic, df_finance, on='ts_code', how='left')
-            elif not df_basic.empty:
+                logger.debug(f"合并daily_basic和fina_indicator数据，结果: {len(result)}行")
+            elif df_basic is not None and not df_basic.empty:
+                # 只有daily_basic有数据
                 result = df_basic
-            elif not df_finance.empty:
+                logger.debug(f"只使用daily_basic数据，结果: {len(result)}行")
+            elif df_finance is not None and not df_finance.empty:
+                # 只有fina_indicator有数据
                 result = df_finance
+                logger.debug(f"只使用fina_indicator数据，结果: {len(result)}行")
+            else:
+                logger.warning(f"股票{ts_code}没有获取到任何基本面数据")
             
             # 如果获取到数据，缓存到Redis
             if not result.empty:
                 self._save_to_redis(cache_key, result)
-                logger.debug(f"从Tushare获取股票{ts_code}基本面数据成功，已保存到Redis")
+                logger.info(f"从Tushare获取股票{ts_code}基本面数据成功，已保存到Redis")
+            else:
+                logger.warning(f"股票{ts_code}基本面数据为空，不缓存")
             
             return result
                 
         except Exception as e:
             logger.error(f"获取股票{ts_code}基本面数据失败: {e}")
+            logger.error(f"错误详情: {traceback.format_exc()}")
             return pd.DataFrame()
     
-    def filter_stocks_by_fundamental(self, stock_list: List[str] = None) -> List[str]:
+    def filter_stocks_by_fundamental(self, stock_list: List[str] = None, date: str = None) -> List[str]:
         """
         根据基本面数据筛选股票
         
         Args:
             stock_list: 待筛选的股票列表，默认使用self.stock_list
+            date: 指定日期，回测模式下使用
             
         Returns:
             筛选后的股票列表
@@ -442,6 +554,7 @@ class DataFetcher:
             stock_list = self.stock_list
         
         if not stock_list:
+            logger.warning("股票列表为空，无法进行基本面筛选")
             return []
         
         # 获取基本面筛选参数
@@ -452,13 +565,42 @@ class DataFetcher:
         max_pe = fundamental_params.get('max_pe', float('inf'))
         max_pb = fundamental_params.get('max_pb', float('inf'))
         
-        logger.info(f"开始基本面筛选，条件: 毛利率>={min_gross_margin}%, ROE>={min_roe}%, ROA>={min_roa}%, PE<={max_pe}, PB<={max_pb}")
+        # 记录筛选条件
+        filter_conditions = []
+        if min_gross_margin > 0:
+            filter_conditions.append(f"毛利率>={min_gross_margin}%")
+        if min_roe > 0:
+            filter_conditions.append(f"ROE>={min_roe}%")
+        if min_roa > 0:
+            filter_conditions.append(f"ROA>={min_roa}%")
+        if max_pe < float('inf'):
+            filter_conditions.append(f"PE<={max_pe}")
+        if max_pb < float('inf'):
+            filter_conditions.append(f"PB<={max_pb}")
+            
+        if not filter_conditions:
+            logger.warning("未设置任何基本面筛选条件，将返回原始股票列表")
+            return stock_list
+            
+        logger.info(f"开始基本面筛选，条件: {', '.join(filter_conditions)}")
         
         # 批量获取基本面数据
         filtered_stocks = []
         batch_size = 50
         total_stocks = len(stock_list)
         processed = 0
+        
+        # 统计筛选结果
+        stats = {
+            'total': total_stocks,
+            'no_data': 0,
+            'failed_gross_margin': 0,
+            'failed_roe': 0,
+            'failed_roa': 0,
+            'failed_pe': 0,
+            'failed_pb': 0,
+            'passed': 0
+        }
         
         for i in range(0, total_stocks, batch_size):
             batch = stock_list[i:i+batch_size]
@@ -470,63 +612,105 @@ class DataFetcher:
                 if ts_code in self.fundamental_data:
                     df = self.fundamental_data[ts_code]
                 else:
-                    df = self.get_fundamental_data(ts_code)
+                    # 在回测模式下，传递日期参数
+                    if self.mode == 'backtest':
+                        # 使用指定日期或回测结束日期
+                        ref_date = date or self.end_date
+                        df = self.get_fundamental_data(ts_code, date=ref_date)
+                    else:
+                        df = self.get_fundamental_data(ts_code)
                     if not df.empty:
                         self.fundamental_data[ts_code] = df
                 
                 if df.empty:
+                    stats['no_data'] += 1
                     continue
                 
                 # 检查基本面指标
                 meets_criteria = True
+                failure_reason = ""
                 
                 # 检查毛利率
                 if 'grossprofit_margin' in df.columns and min_gross_margin > 0:
                     gross_margin = df['grossprofit_margin'].iloc[0]
                     if pd.isna(gross_margin) or gross_margin is None or gross_margin < min_gross_margin:
                         meets_criteria = False
+                        failure_reason = "毛利率"
+                        stats['failed_gross_margin'] += 1
                         logger.debug(f"股票{ts_code}毛利率不符合条件: {gross_margin if not pd.isna(gross_margin) else 'N/A'} < {min_gross_margin}")
                 
                 # 检查ROE
-                if 'roe' in df.columns and min_roe > 0:
+                if meets_criteria and 'roe' in df.columns and min_roe > 0:
                     roe = df['roe'].iloc[0]
                     if pd.isna(roe) or roe is None or roe < min_roe:
                         meets_criteria = False
+                        failure_reason = "ROE"
+                        stats['failed_roe'] += 1
                         logger.debug(f"股票{ts_code}ROE不符合条件: {roe if not pd.isna(roe) else 'N/A'} < {min_roe}")
                 
                 # 检查ROA
-                if 'roa' in df.columns and min_roa > 0:
+                if meets_criteria and 'roa' in df.columns and min_roa > 0:
                     roa = df['roa'].iloc[0]
                     if pd.isna(roa) or roa is None or roa < min_roa:
                         meets_criteria = False
+                        failure_reason = "ROA"
+                        stats['failed_roa'] += 1
                         logger.debug(f"股票{ts_code}ROA不符合条件: {roa if not pd.isna(roa) else 'N/A'} < {min_roa}")
                 
                 # 检查PE
-                if 'pe' in df.columns and max_pe < float('inf'):
+                if meets_criteria and 'pe' in df.columns and max_pe < float('inf'):
                     pe = df['pe'].iloc[0]
                     if pd.isna(pe) or pe is None or pe > max_pe or pe <= 0:
                         meets_criteria = False
+                        failure_reason = "PE"
+                        stats['failed_pe'] += 1
                         logger.debug(f"股票{ts_code}PE不符合条件: {pe if not pd.isna(pe) else 'N/A'} > {max_pe} 或 <= 0")
                 
                 # 检查PB
-                if 'pb' in df.columns and max_pb < float('inf'):
+                if meets_criteria and 'pb' in df.columns and max_pb < float('inf'):
                     pb = df['pb'].iloc[0]
                     if pd.isna(pb) or pb is None or pb > max_pb or pb <= 0:
                         meets_criteria = False
+                        failure_reason = "PB"
+                        stats['failed_pb'] += 1
                         logger.debug(f"股票{ts_code}PB不符合条件: {pb if not pd.isna(pb) else 'N/A'} > {max_pb} 或 <= 0")
                 
                 if meets_criteria:
                     filtered_stocks.append(ts_code)
+                    stats['passed'] += 1
                     logger.debug(f"股票{ts_code}通过基本面筛选")
+                else:
+                    logger.debug(f"股票{ts_code}未通过基本面筛选，失败原因: {failure_reason}")
         
-        logger.info(f"基本面筛选完成，从{len(stock_list)}只股票中筛选出{len(filtered_stocks)}只符合条件的股票")
+        # 输出详细的筛选统计
+        logger.info(f"基本面筛选完成，从{stats['total']}只股票中筛选出{stats['passed']}只符合条件的股票")
+        logger.info(f"筛选统计: 无数据={stats['no_data']}，毛利率不符={stats['failed_gross_margin']}，"
+                  f"ROE不符={stats['failed_roe']}，ROA不符={stats['failed_roa']}，"
+                  f"PE不符={stats['failed_pe']}，PB不符={stats['failed_pb']}")
+        
+        # 如果筛选后股票数量太少，给出警告
+        if len(filtered_stocks) < 10:
+            logger.warning(f"筛选后股票数量过少({len(filtered_stocks)}只)，可能会影响回测结果，建议放宽筛选条件")
+            
         return filtered_stocks
     
     def _get_latest_quarter(self) -> str:
         """获取最近的财报季度"""
         now = datetime.now()
-        year = now.year
-        month = now.month
+        return self._get_quarter_for_date(now)
+    
+    def _get_quarter_for_date(self, date_obj: datetime) -> str:
+        """
+        根据日期获取对应的财报季度
+        
+        Args:
+            date_obj: 日期对象
+            
+        Returns:
+            财报季度字符串 (YYYYMMDD格式)
+        """
+        year = date_obj.year
+        month = date_obj.month
         
         if month < 4:
             return f"{year-1}1231"
@@ -536,6 +720,101 @@ class DataFetcher:
             return f"{year}0630"
         else:
             return f"{year}0930"
+    
+    def _get_previous_quarter(self, quarter: str) -> str:
+        """获取上一个财报季度"""
+        year = int(quarter[:4])
+        month = int(quarter[4:6])
+        
+        if month == 3:  # 如果是Q1 (0331)
+            return f"{year-1}1231"
+        elif month == 6:  # 如果是Q2 (0630)
+            return f"{year}0331"
+        elif month == 9:  # 如果是Q3 (0930)
+            return f"{year}0630"
+        else:  # 如果是Q4 (1231)
+            return f"{year}0930"
+    
+    def _get_recent_trade_date(self) -> str:
+        """获取最近的交易日期"""
+        try:
+            # 获取当前日期
+            now = datetime.now()
+            
+            # 尝试获取最近30天的交易数据
+            end_date = now.strftime('%Y%m%d')
+            start_date = (now - timedelta(days=30)).strftime('%Y%m%d')
+            
+            # 使用上证指数（000001.SH）作为参考获取交易日
+            # 使用daily API而不是trade_cal
+            df_daily = self.pro.daily(
+                ts_code='000001.SH',
+                start_date=start_date,
+                end_date=end_date
+            )
+            
+            if not df_daily.empty:
+                # 按日期降序排序，获取最近的交易日
+                df_daily = df_daily.sort_values('trade_date', ascending=False)
+                return df_daily['trade_date'].iloc[0]
+            else:
+                # 如果获取失败，返回昨天的日期
+                yesterday = (now - timedelta(days=1)).strftime('%Y%m%d')
+                logger.warning(f"无法获取最近交易日，使用昨天日期: {yesterday}")
+                return yesterday
+                
+        except Exception as e:
+            # 如果出错，返回昨天的日期
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+            logger.error(f"获取最近交易日出错: {e}，使用昨天日期: {yesterday}")
+            return yesterday
+    
+    def _get_nearest_trade_date(self, date_str: str) -> str:
+        """
+        获取指定日期最近的交易日（回测模式）
+        
+        Args:
+            date_str: 日期字符串 (YYYY-MM-DD 或 YYYYMMDD格式)
+            
+        Returns:
+            最近的交易日 (YYYYMMDD格式)
+        """
+        try:
+            # 标准化日期格式
+            if '-' in date_str:
+                date_str = date_str.replace('-', '')
+            
+            # 向前后各查找15天，以找到最近的交易日
+            date_obj = datetime.strptime(date_str, '%Y%m%d')
+            start_date = (date_obj - timedelta(days=15)).strftime('%Y%m%d')
+            end_date = (date_obj + timedelta(days=15)).strftime('%Y%m%d')
+            
+            # 使用上证指数（000001.SH）作为参考获取交易日
+            # 使用daily API而不是trade_cal
+            df_daily = self.pro.daily(
+                ts_code='000001.SH',
+                start_date=start_date,
+                end_date=end_date
+            )
+            
+            if not df_daily.empty:
+                # 将日期转换为数值进行比较
+                target_date = int(date_str)
+                df_daily['date_diff'] = abs(df_daily['trade_date'].astype(int) - target_date)
+                
+                # 按日期差排序，获取最近的交易日
+                df_daily = df_daily.sort_values('date_diff')
+                nearest_date = df_daily['trade_date'].iloc[0]
+                
+                logger.debug(f"找到日期 {date_str} 最近的交易日: {nearest_date}")
+                return nearest_date
+            else:
+                logger.warning(f"无法获取日期 {date_str} 附近的交易数据，使用原始日期")
+                return date_str
+                
+        except Exception as e:
+            logger.error(f"获取最近交易日出错: {e}，使用原始日期: {date_str}")
+            return date_str
     
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """

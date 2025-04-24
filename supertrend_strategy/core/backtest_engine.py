@@ -85,7 +85,7 @@ class BacktestEngine:
     
     def run_backtest(self, start_date: str = None, end_date: str = None,
                     stock_list: List[str] = None, verbose: bool = True,
-                    apply_fundamental_filter: bool = False) -> Dict:
+                    apply_fundamental_filter: bool = True) -> Dict:
         """
         运行回测
         
@@ -94,7 +94,7 @@ class BacktestEngine:
             end_date: 结束日期，默认使用配置文件中的日期
             stock_list: 股票列表，默认使用所有A股
             verbose: 是否显示进度条
-            apply_fundamental_filter: 是否应用基本面筛选
+            apply_fundamental_filter: 是否应用基本面筛选，默认为True
             
         Returns:
             回测结果字典
@@ -117,9 +117,14 @@ class BacktestEngine:
             stock_list = self.data_fetcher.get_stock_list()
             
             # 应用基本面筛选
-            if apply_fundamental_filter and self.config.get('fundamental'):
-                logger.info("应用基本面筛选条件...")
-                stock_list = self.data_fetcher.filter_stocks_by_fundamental(stock_list)
+            if apply_fundamental_filter:
+                if self.config.get('fundamental'):
+                    logger.info("应用基本面筛选条件...")
+                    # 传递回测结束日期，确保使用回测期间的基本面数据
+                    stock_list = self.data_fetcher.filter_stocks_by_fundamental(stock_list, date=self.end_date)
+                    logger.info(f"基本面筛选后剩余股票数量: {len(stock_list)}")
+                else:
+                    logger.warning("未找到基本面筛选参数配置，将使用所有股票")
         
         # 获取交易日历
         logger.info("获取交易日历...")

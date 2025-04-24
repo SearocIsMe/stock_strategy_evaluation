@@ -117,9 +117,9 @@ def run_backtest(config: dict, args) -> Dict:
     """运行回测"""
     logger.info(f"初始化回测组件，使用策略: {args.strategy}...")
     
-    # 初始化组件
-    data_fetcher = DataFetcher(args.config)
-    signal_generator = SignalGenerator(args.config)
+    # 初始化组件 - 明确指定回测模式
+    data_fetcher = DataFetcher(args.config, mode='backtest')
+    signal_generator = SignalGenerator(args.config, mode='backtest')
     risk_manager = RiskManager(args.config)
     backtest_engine = BacktestEngine(args.config)
     
@@ -137,13 +137,31 @@ def run_backtest(config: dict, args) -> Dict:
     
     # 设置是否输出CSV文件
     config['evaluation']['output_daily_records'] = args.output_csv
+
+    # 检查基本面筛选参数
+    if config.get('fundamental'):
+        fundamental_params = config['fundamental']
+        logger.info(f"将使用以下基本面筛选条件:")
+        if fundamental_params.get('min_gross_margin', 0) > 0:
+            logger.info(f"  - 最低毛利率: {fundamental_params.get('min_gross_margin')}%")
+        if fundamental_params.get('min_roe', 0) > 0:
+            logger.info(f"  - 最低ROE: {fundamental_params.get('min_roe')}%")
+        if fundamental_params.get('min_roa', 0) > 0:
+            logger.info(f"  - 最低ROA: {fundamental_params.get('min_roa')}%")
+        if fundamental_params.get('max_pe', float('inf')) < float('inf'):
+            logger.info(f"  - 最高PE: {fundamental_params.get('max_pe')}")
+        if fundamental_params.get('max_pb', float('inf')) < float('inf'):
+            logger.info(f"  - 最高PB: {fundamental_params.get('max_pb')}")
+    else:
+        logger.warning("未找到基本面筛选参数配置，将使用所有股票")
     
+    # 运行回测
     backtest_results = backtest_engine.run_backtest(
         start_date=start_date,
         end_date=end_date,
         stock_list=stock_list,
         verbose=args.verbose,
-        apply_fundamental_filter=True  # 应用基本面筛选
+        apply_fundamental_filter=True  # 默认应用基本面筛选
     )
     
     # 输出回测结果
@@ -161,7 +179,7 @@ def run_backtest(config: dict, args) -> Dict:
         # 生成图表
         if args.plot:
             logger.info("生成回测报告图表...")
-            plotter = Plotter(args.output_dir)
+            plotter = Plotter(args.output_dir, mode='backtest')
             report_path = plotter.generate_report(backtest_results)
             logger.info(f"回测报告已保存至: {report_path}")
             
@@ -186,6 +204,12 @@ def run_backtest(config: dict, args) -> Dict:
 def run_live_trading(config: dict, args):
     """运行实盘交易（示例框架，实际实现需要对接交易接口）"""
     logger.info("实盘交易模式尚未实现")
+    
+    # 初始化组件 - 明确指定实盘模式
+    data_fetcher = DataFetcher(args.config, mode='live')
+    signal_generator = SignalGenerator(args.config, mode='live')
+    risk_manager = RiskManager(args.config)
+    
     logger.info("这需要对接实际的交易接口，如：券商API、交易所API等")
     logger.info("实盘交易流程大致如下:")
     logger.info("1. 初始化交易接口连接")
@@ -226,7 +250,7 @@ if __name__ == "__main__":
     try:
         main()
     except KeyboardInterrupt:
-        logger.info("程序被用户中断") 
+        logger.info("程序被用户中断")
         sys.exit(0)
     except Exception as e:
         logger.exception(f"程序运行出错: {e}")
