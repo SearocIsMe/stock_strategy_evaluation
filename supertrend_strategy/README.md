@@ -66,7 +66,7 @@ python main.py --mode backtest
 
 Specify date range:
 ```bash
-python main.py --mode backtest --start_date 2023-01-01 --end_date 2023-12-31
+python main.py --strategy default --start_date 2024-03-01 --end_date 2024-06-03 --output_csv
 ```
 
 Specify stock list:
@@ -122,3 +122,5 @@ The backtest results include:
 - [Tushare](https://tushare.pro/) for providing financial data
 - [Pandas](https://pandas.pydata.org/) for data manipulation
 - [Matplotlib](https://matplotlib.org/) and [Seaborn](https://seaborn.pydata.org/) for visualization
+
+

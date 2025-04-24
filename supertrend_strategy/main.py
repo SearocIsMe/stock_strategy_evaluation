@@ -156,13 +156,14 @@ def run_backtest(config: dict, args) -> Dict:
         logger.warning("未找到基本面筛选参数配置，将使用所有股票")
     
     # 运行回测
+    logger.info(f"开始回测，从{start_date}到{end_date}...")
     backtest_results = backtest_engine.run_backtest(
-        start_date=start_date,
-        end_date=end_date,
-        stock_list=stock_list,
-        verbose=args.verbose,
-        apply_fundamental_filter=True  # 默认应用基本面筛选
-    )
+         start_date=start_date,
+         end_date=end_date,
+         stock_list=stock_list,
+         verbose=args.verbose,
+         apply_fundamental_filter=True  # 默认应用基本面筛选
+     )
     
     # 输出回测结果
     if backtest_results:

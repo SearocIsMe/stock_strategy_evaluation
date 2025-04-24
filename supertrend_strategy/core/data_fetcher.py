@@ -397,7 +397,14 @@ class DataFetcher:
         if self.mode == 'backtest':
             # 回测模式：使用指定日期或回测结束日期
             ref_date = date or self.end_date
-            ref_date_obj = datetime.strptime(ref_date.replace('-', ''), '%Y%m%d')
+            
+            # 更健壮的日期解析：处理不同格式的日期
+            if '-' in ref_date:
+                # 格式为 YYYY-MM-DD
+                ref_date_obj = datetime.strptime(ref_date, '%Y-%m-%d')
+            else:
+                # 格式为 YYYYMMDD
+                ref_date_obj = datetime.strptime(ref_date, '%Y%m%d')
             quarter = self._get_quarter_for_date(ref_date_obj)
             logger.debug(f"回测模式，使用日期: {ref_date}, 季度: {quarter}")
         else:
