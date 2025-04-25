@@ -89,7 +89,31 @@ class SignalGenerator:
         if current_positions is None:
             current_positions = {}
         
-        logger.info(f"开始为日期 {date} 生成信号，共 {total_stocks} 只股票")
+        # 检查当天是否为交易日
+        try:
+            # 确保日期格式正确 (YYYYMMDD)
+            formatted_date = date.replace('-', '')
+            
+            # 使用trade_cal接口检查所有交易所在目标日期是否开市
+            df_trade_cal = self.data_fetcher.pro.trade_cal(exchange='', start_date=formatted_date, end_date=formatted_date)
+            
+            # 详细记录交易日历数据以便调试
+            if not df_trade_cal.empty:
+                is_open = df_trade_cal['is_open'].iloc[0]
+                logger.info(f"交易日历检查: 日期={date}, is_open={is_open}")
+                
+                # 检查是否有数据并且is_open为1 (1表示交易日，0表示非交易日)
+                if is_open != 1:
+                    logger.info(f"日期 {date} 不是交易日 (is_open={is_open})，跳过信号生成")
+                    return signals
+            else:
+                logger.warning(f"日期 {date} 的交易日历数据为空，假定为非交易日")
+                return signals
+                
+            logger.info(f"开始为日期 {date} 生成信号，共 {total_stocks} 只股票")
+        except Exception as e:
+            logger.error(f"检查交易日失败: {e}")
+            logger.info(f"开始为日期 {date} 生成信号，共 {total_stocks} 只股票（未验证交易日）")
         
         for ts_code, df in stock_data.items():
             # 确保数据不为空且包含指定日期

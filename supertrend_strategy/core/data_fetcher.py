@@ -413,7 +413,7 @@ class DataFetcher:
         if not refresh:
             redis_data = self._get_from_redis(cache_key)
             if redis_data is not None:
-                logger.info(f"从Redis获取股票{ts_code}基本面数据成功")
+                logger.debug(f"从Redis获取股票{ts_code}基本面数据成功")
                 return redis_data
         
         try:
@@ -528,7 +528,7 @@ class DataFetcher:
             # 如果获取到数据，缓存到Redis
             if not result.empty:
                 self._save_to_redis(cache_key, result)
-                logger.info(f"从Tushare获取股票{ts_code}基本面数据成功，已保存到Redis")
+                logger.debug(f"从Tushare获取股票{ts_code}基本面数据成功，已保存到Redis")
             else:
                 logger.warning(f"股票{ts_code}基本面数据为空，不缓存")
             
