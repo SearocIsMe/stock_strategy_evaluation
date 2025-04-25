@@ -14,8 +14,8 @@ redis:
 # 数据获取参数
 data:
   tushare_token: "123"  # 可通过环境变量TUSHARE_TOKEN覆盖
-  start_date: "2024-01-01"  # 回测开始日期
-  end_date: "2024-02-28"    # 回测结束日期
+  start_date: "2024-03-01"  # 回测开始日期
+  end_date: "2024-06-31"    # 回测结束日期
   universe: "A"             # 股票池: A=所有A股
   
   # 股票筛选条件
@@ -33,6 +33,18 @@ capital:
 evaluation:
   benchmark: "000300.SH"    # 基准指数: 沪深300
   output_benchmark_details: true  # 输出基准指数详细信息
+  output_daily_records: true      # 输出每日交易记录到CSV文件
+  
+  # 交易费用参数
+  transaction_costs:
+    commission_rate: 0.00025      # 佣金费率 (万分之2.5)
+    stamp_duty_rate: 0.001        # 印花税 (卖出时千分之1)
+    min_commission: 5.0           # 最低佣金(元)
+  
+  # 持仓比例参数
+  position_limits:
+    max_position_ratio: 0.20      # 单只股票最大持仓比例 (20%)
+    min_position_ratio: 0.05      # 单只股票最小持仓比例 (5%)
 
 # 基本面筛选参数
 fundamental:

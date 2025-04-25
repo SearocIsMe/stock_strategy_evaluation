@@ -54,6 +54,8 @@ def parse_args():
                       help='是否显示详细信息')
     parser.add_argument('--plot', action='store_true', default=True,
                       help='是否生成图表')
+    parser.add_argument('--output_csv', action='store_true', default=True,
+                      help='是否输出每日交易记录到CSV文件')
     
     return parser.parse_args()
 
@@ -133,6 +135,9 @@ def run_backtest(config: dict, args) -> Dict:
     # 运行回测
     logger.info(f"开始回测，从{start_date}到{end_date}...")
     
+    # 设置是否输出CSV文件
+    config['evaluation']['output_daily_records'] = args.output_csv
+
     # 检查基本面筛选参数
     if config.get('fundamental'):
         fundamental_params = config['fundamental']
@@ -151,13 +156,14 @@ def run_backtest(config: dict, args) -> Dict:
         logger.warning("未找到基本面筛选参数配置，将使用所有股票")
     
     # 运行回测
+    logger.info(f"开始回测，从{start_date}到{end_date}...")
     backtest_results = backtest_engine.run_backtest(
-        start_date=start_date,
-        end_date=end_date,
-        stock_list=stock_list,
-        verbose=args.verbose,
-        apply_fundamental_filter=True  # 默认应用基本面筛选
-    )
+         start_date=start_date,
+         end_date=end_date,
+         stock_list=stock_list,
+         verbose=args.verbose,
+         apply_fundamental_filter=True  # 默认应用基本面筛选
+     )
     
     # 输出回测结果
     if backtest_results:
