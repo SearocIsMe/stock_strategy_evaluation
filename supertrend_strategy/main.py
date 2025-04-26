@@ -168,7 +168,7 @@ def run_backtest(config: dict, args) -> Dict:
     # 输出回测结果
     if backtest_results:
         metrics = backtest_results.get('performance_metrics', {})
-        logger.info("回测完成，绩效指标:")
+        logger.info("回测完成，绩效指标:") 
         logger.info(f"总收益率: {metrics.get('total_return', 0):.2f}%")
         logger.info(f"年化收益率: {metrics.get('annual_return', 0):.2f}%")
         logger.info(f"夏普比率: {metrics.get('sharpe_ratio', 0):.2f}")

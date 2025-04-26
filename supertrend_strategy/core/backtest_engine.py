@@ -149,9 +149,12 @@ class BacktestEngine:
         batch_size = 50
         all_stock_data = {}
         
+        # 获取刷新指示器配置
+        refresh_indicator = self.config['data'].get('refresh_indicator', True)
+        
         for i in range(0, len(stock_list), batch_size):
             batch = stock_list[i:i+batch_size]
-            batch_data = self.data_fetcher.get_batch_stock_data(batch, self.start_date, self.end_date)
+            batch_data = self.data_fetcher.get_batch_stock_data(batch, self.start_date, self.end_date, refresh=refresh_indicator)
             all_stock_data.update(batch_data)
             
             if verbose:

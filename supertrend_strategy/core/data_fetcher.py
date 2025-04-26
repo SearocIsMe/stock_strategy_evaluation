@@ -326,8 +326,15 @@ class DataFetcher:
             包含价格和技术指标的DataFrame
         """
         # 设置日期范围
-        start = start_date or self.config['data']['start_date']
+        original_start = start_date or self.config['data']['start_date']
         end = end_date or self.config['data']['end_date']
+        
+        # 获取回溯期天数
+        lookback_period = self.config['data'].get('lookback_period', 10)
+        
+        # 调整开始日期，向前推移回溯期天数
+        start = self._adjust_date_by_days(original_start, -lookback_period)
+        logger.debug(f"调整开始日期: 从 {original_start} 到 {start} (回溯{lookback_period}天)")
         
         # 生成缓存键
         cache_key = f"stock_data:{ts_code}:{start}:{end}"
@@ -776,6 +783,33 @@ class DataFetcher:
             logger.error(f"获取最近交易日出错: {e}，使用昨天日期: {yesterday}")
             return yesterday
     
+    def _adjust_date_by_days(self, date_str: str, days: int) -> str:
+        """
+        调整日期，向前或向后推移指定天数
+        
+        Args:
+            date_str: 日期字符串 (YYYY-MM-DD 或 YYYYMMDD格式)
+            days: 调整天数，正数为向后，负数为向前
+            
+        Returns:
+            调整后的日期 (与输入格式相同)
+        """
+        # 标准化日期格式
+        has_hyphen = '-' in date_str
+        if has_hyphen:
+            date_obj = datetime.strptime(date_str, '%Y-%m-%d')
+        else:
+            date_obj = datetime.strptime(date_str, '%Y%m%d')
+        
+        # 调整日期
+        adjusted_date = date_obj + timedelta(days=days)
+        
+        # 返回与输入格式相同的日期字符串
+        if has_hyphen:
+            return adjusted_date.strftime('%Y-%m-%d')
+        else:
+            return adjusted_date.strftime('%Y%m%d')
+    
     def _get_nearest_trade_date(self, date_str: str) -> str:
         """
         获取指定日期最近的交易日（回测模式）
@@ -1038,13 +1072,16 @@ class DataFetcher:
         df['concentration_ratio'] = np.nan
         df['dominant_price'] = np.nan
         
+        # 获取回溯期天数
+        lookback_period = self.config['data'].get('lookback_period', 10)
+        
         # 计算成交量加权平均价格（VWAP）作为主力成本
-        for i in range(10, len(df)):  # 至少需要10天数据
+        for i in range(lookback_period, len(df)):  # 至少需要lookback_period天数据
             # 获取历史成交量数据
             volume_array = df.iloc[:i]['vol'].values
             
-            # 前置条件校验：至少10天数据且所有成交量非负
-            if len(volume_array) >= 10 and np.min(volume_array) >= 0:
+            # 前置条件校验：至少lookback_period天数据且所有成交量非负
+            if len(volume_array) >= lookback_period and np.min(volume_array) >= 0:
                 # 计算动态窗口大小
                 window_size = max(3, int(np.sqrt(len(volume_array))))
                 
@@ -1114,6 +1151,13 @@ class DataFetcher:
         period = self.config['rsi']['period']
         overbought = self.config['rsi']['overbought']
         
+        # 确保数据足够计算RSI
+        if len(df) < period + 1:
+            logger.warning(f"数据长度不足以计算RSI，需要至少{period+1}条数据，但只有{len(df)}条")
+            df['rsi'] = np.nan
+            df['overbought'] = 0
+            return
+        
         # 计算价格变化
         delta = df['close'].diff()
         
@@ -1121,18 +1165,26 @@ class DataFetcher:
         gain = delta.where(delta > 0, 0)
         loss = -delta.where(delta < 0, 0)
         
-        # 计算平均上涨和下跌
-        avg_gain = gain.rolling(window=period).mean()
-        avg_loss = loss.rolling(window=period).mean()
+        # 使用指数移动平均计算平均上涨和下跌（更稳定）
+        avg_gain = gain.ewm(alpha=1/period, min_periods=period).mean()
+        avg_loss = loss.ewm(alpha=1/period, min_periods=period).mean()
         
-        # 计算相对强度
-        rs = avg_gain / avg_loss
+        # 计算相对强度，避免除以零
+        rs = np.where(avg_loss != 0, avg_gain / avg_loss, 100)  # 当avg_loss为0时，将rs设为100（相当于RSI=99）
         
         # 计算RSI
         df['rsi'] = 100 - (100 / (1 + rs))
         
+        # 处理极端情况
+        df['rsi'] = np.where(avg_gain == 0, 0, df['rsi'])  # 如果没有上涨，RSI=0
+        df['rsi'] = np.where(avg_loss == 0, 100, df['rsi'])  # 如果没有下跌，RSI=100
+        
         # 计算超买信号
         df['overbought'] = np.where(df['rsi'] > overbought, 1, 0)
+        
+        # 填充前period个值为NaN
+        df.loc[:period, 'rsi'] = np.nan
+        df.loc[:period, 'overbought'] = 0
 
     def get_batch_stock_data(self, ts_codes: List[str], start_date: str = None,
                             end_date: str = None, refresh: bool = False) -> Dict[str, pd.DataFrame]:
@@ -1149,8 +1201,15 @@ class DataFetcher:
             股票数据字典 {股票代码: 数据DataFrame}
         """
         # 设置日期范围
-        start = start_date or self.config['data']['start_date']
+        original_start = start_date or self.config['data']['start_date']
         end = end_date or self.config['data']['end_date']
+        
+        # 获取回溯期天数
+        lookback_period = self.config['data'].get('lookback_period', 10)
+        
+        # 调整开始日期，向前推移回溯期天数
+        start = self._adjust_date_by_days(original_start, -lookback_period)
+        logger.debug(f"批量获取数据：调整开始日期: 从 {original_start} 到 {start} (回溯{lookback_period}天)")
         
         # 生成批量缓存键
         batch_cache_key = f"batch_stock_data:{','.join(ts_codes)}:{start}:{end}"

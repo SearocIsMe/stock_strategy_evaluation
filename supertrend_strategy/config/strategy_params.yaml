@@ -14,9 +14,11 @@ redis:
 # 数据获取参数
 data:
   tushare_token: "123"  # 可通过环境变量TUSHARE_TOKEN覆盖
-  start_date: "2024-03-01"  # 回测开始日期
-  end_date: "2024-06-31"    # 回测结束日期
+  start_date: "2024-05-01"  # 回测开始日期
+  end_date: "2024-06-30"    # 回测结束日期
   universe: "A"             # 股票池: A=所有A股
+  refresh_indicator: true   # 是否强制刷新数据缓存
+  lookback_period: 10       # 指标计算所需的历史数据天数
   
   # 股票筛选条件
   stock_filters:
