@@ -186,6 +186,25 @@ class BacktestEngine:
             if i % 20 == 0 and not verbose:  # 如果使用tqdm则不需要额外显示进度
                 logger.info(f"回测进度: {i}/{total_days} ({i/total_days*100:.1f}%)")
             
+            # 检查当日是否为交易日
+            try:
+                # 格式化日期为YYYYMMDD格式
+                date_str = date.replace('-', '')
+                
+                # 查询交易日历
+                trade_cal_df = self.data_fetcher.pro.trade_cal(
+                    exchange='SSE',
+                    start_date=date_str,
+                    end_date=date_str
+                )
+                
+                # 检查是否为交易日
+                if trade_cal_df.empty or trade_cal_df['is_open'].iloc[0] != 1:
+                    logger.debug(f"日期 {date} 不是交易日，跳过")
+                    continue
+            except Exception as e:
+                logger.warning(f"检查交易日失败: {e}，假设 {date} 是交易日并继续")
+            
             # 生成当日信号 - 传递当前持仓信息
             signals = self.signal_generator.generate_signals(all_stock_data, date, self.risk_manager.positions)
             
