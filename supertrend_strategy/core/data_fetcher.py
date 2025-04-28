@@ -620,7 +620,15 @@ class DataFetcher:
             batch = stock_list[i:i+batch_size]
             processed += len(batch)
             logger.info(f"正在获取基本面数据 {processed}/{total_stocks}")
-            
+
+            # 使用指定日期或回测结束日期
+            ref_date = date or self.end_date
+            # 检查日期是否为交易日，如果不是则跳过
+            if not self._is_trade_date(ref_date):
+                logger.debug(f"日期 {ref_date} 不是交易日，跳过")
+                stats['no_data'] += 1
+                continue
+
             for ts_code in batch:
                 # 获取基本面数据
                 if ts_code in self.fundamental_data:
@@ -628,8 +636,6 @@ class DataFetcher:
                 else:
                     # 在回测模式下，传递日期参数
                     if self.mode == 'backtest':
-                        # 使用指定日期或回测结束日期
-                        ref_date = date or self.end_date
                         df = self.get_fundamental_data(ts_code, date=ref_date)
                     else:
                         df = self.get_fundamental_data(ts_code)
@@ -856,6 +862,27 @@ class DataFetcher:
         except Exception as e:
             logger.error(f"获取最近交易日出错: {e}，使用原始日期: {date_str}")
             return date_str
+    
+    def _is_trade_date(self, date_str: str) -> bool:
+        """
+        检查指定日期是否为交易日
+        
+        Args:
+            date_str: 日期字符串 (YYYY-MM-DD 或 YYYYMMDD格式)
+            
+        Returns:
+            是否为交易日
+        """
+        # 标准化日期格式
+        if '-' in date_str:
+            date_str = date_str.replace('-', '')
+        
+        # 获取交易日历（如果尚未获取）
+        if not self.trade_dates:
+            self.get_trade_dates()
+        
+        # 检查日期是否在交易日列表中
+        return date_str in self.trade_dates
     
     def _calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """

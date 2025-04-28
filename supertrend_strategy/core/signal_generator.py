@@ -119,7 +119,12 @@ class SignalGenerator:
             # 确保数据不为空且包含指定日期
             if df.empty or date not in df['trade_date'].values:
                 continue
-            
+
+            # 检查日期是否为交易日，如果不是则跳过获取基本面数据
+            if date and not self.data_fetcher._is_trade_date(date):
+                logger.debug(f"日期 {date} 不是交易日，跳过获取 {ts_code} 的基本面数据")
+                continue
+
             # 获取指定日期的数据
             date_idx = df[df['trade_date'] == date].index[0]
             
