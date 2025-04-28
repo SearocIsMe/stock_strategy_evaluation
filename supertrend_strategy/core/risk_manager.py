@@ -38,11 +38,18 @@ class RiskManager:
         self.take_profit_pct = self.config['exit']['take_profit'] / 100
         self.stop_loss_pct = self.config['exit']['stop_loss'] / 100
         
+        # 激进策略的部分止盈参数
+        self.partial_take_profit_pct1 = 0.30  # 30%止盈点
+        self.partial_take_profit_pct2 = 0.50  # 50%止盈点
+        
         # 持仓记录
         self.positions = {}  # {股票代码: {'entry_price': 价格, 'shares': 数量, 'entry_date': 日期, ...}}
         
         # 交易记录
         self.trades = []  # 交易记录列表
+        
+        # 部分止盈记录
+        self.partial_profit_taken = {}  # {股票代码: {'30%': True/False, '50%': True/False}}
     
     def _load_config(self, config_path: str) -> dict:
         """加载配置文件"""
@@ -114,8 +121,8 @@ class RiskManager:
         # 返回较大的值，确保仓位不小于最小比例
         return max(avg_position_size, min_position_size)
     
-    def open_position(self, ts_code: str, price: float, date: str, 
-                     available_capital: float = None) -> Dict:
+    def open_position(self, ts_code: str, price: float, date: str,
+                     available_capital: float = None, signals: Dict = None) -> Dict:
         """
         开仓
         
@@ -124,6 +131,7 @@ class RiskManager:
             price: 开仓价格
             date: 开仓日期
             available_capital: 可用资金，默认使用当前资金
+            signals: 信号字典，用于获取额外信息
             
         Returns:
             开仓信息字典
@@ -181,6 +189,17 @@ class RiskManager:
             'stop_loss_price': price * (1 - self.stop_loss_pct)
         }
         
+        # 获取当前策略ID
+        strategy_id = self.config.get('active_strategy', 'default')
+        
+        # 如果是激进策略，添加额外信息
+        if strategy_id == 'aggressive' and signals and ts_code in signals:
+            # 添加涨停信息
+            position['limit_up_valid'] = signals[ts_code].get('limit_up_valid', False)
+            
+            # 添加月线MACD信息
+            position['monthly_macd_golden_cross'] = signals[ts_code].get('monthly_macd_golden_cross', False)
+        
         self.positions[ts_code] = position
         
         # 记录交易
@@ -193,12 +212,21 @@ class RiskManager:
             'value': actual_capital,
             'commission': self._calculate_commission(actual_capital, is_sell=False)
         }
+        
+        # 如果是激进策略，添加额外信息到交易记录
+        if strategy_id == 'aggressive' and signals and ts_code in signals:
+            # 添加涨停信息
+            trade['limit_up_valid'] = signals[ts_code].get('limit_up_valid', False)
+            
+            # 添加月线MACD信息
+            trade['monthly_macd_golden_cross'] = signals[ts_code].get('monthly_macd_golden_cross', False)
         self.trades.append(trade)
         
         logger.info(f"开仓: {ts_code}, 价格: {price}, 股数: {shares}, 金额: {actual_capital:.2f}")
         return position
     
-    def close_position(self, ts_code: str, price: float, date: str, reason: str = 'signal') -> Dict:
+    def close_position(self, ts_code: str, price: float, date: str, reason: str = 'signal',
+                      partial_ratio: float = 1.0) -> Dict:
         """
         平仓
         
@@ -206,7 +234,8 @@ class RiskManager:
             ts_code: 股票代码
             price: 平仓价格
             date: 平仓日期
-            reason: 平仓原因 ('signal', 'stop_loss', 'take_profit')
+            reason: 平仓原因 ('signal', 'stop_loss', 'take_profit', 'partial_take_profit_30', 'partial_take_profit_50')
+            partial_ratio: 平仓比例 (1.0表示全部平仓，小于1.0表示部分平仓)
             
         Returns:
             平仓信息字典
@@ -219,12 +248,19 @@ class RiskManager:
         # 获取持仓信息
         position = self.positions[ts_code]
         
+        # 计算平仓股数
+        shares_to_close = int(position['shares'] * partial_ratio)
+        if shares_to_close < 100:  # 确保至少卖出100股
+            shares_to_close = min(100, position['shares'])
+        
         # 计算平仓金额
-        close_value = position['shares'] * price
+        close_value = shares_to_close * price
         
         # 计算收益
-        profit = close_value - position['capital']
-        profit_pct = profit / position['capital'] * 100
+        position_ratio = shares_to_close / position['shares']
+        capital_closed = position['capital'] * position_ratio
+        profit = close_value - capital_closed
+        profit_pct = profit / capital_closed * 100
         
         # 记录交易
         trade = {
@@ -232,23 +268,43 @@ class RiskManager:
             'date': date,
             'type': 'sell',
             'price': price,
-            'shares': position['shares'],
+            'shares': shares_to_close,
             'value': close_value,
             'commission': self._calculate_commission(close_value, is_sell=True),
             'profit': profit,
             'profit_pct': profit_pct,
             'hold_days': self._calculate_hold_days(position['entry_date'], date),
-            'reason': reason
+            'reason': reason,
+            'partial_ratio': partial_ratio
         }
         self.trades.append(trade)
         
         # 更新资金
         self.current_capital += profit
         
-        # 移除持仓
-        del self.positions[ts_code]
+        # 更新或移除持仓
+        if partial_ratio < 1.0 and position['shares'] - shares_to_close >= 100:
+            # 部分平仓，更新持仓
+            self.positions[ts_code]['shares'] -= shares_to_close
+            self.positions[ts_code]['capital'] -= capital_closed
+            
+            # 更新部分止盈记录
+            if reason == 'partial_take_profit_30':
+                self.partial_profit_taken[ts_code]['30%'] = True
+            elif reason == 'partial_take_profit_50':
+                self.partial_profit_taken[ts_code]['50%'] = True
+                
+            logger.info(f"部分平仓: {ts_code}, 价格: {price}, 股数: {shares_to_close}, "
+                      f"收益: {profit:.2f} ({profit_pct:.2f}%), 原因: {reason}")
+        else:
+            # 全部平仓，移除持仓
+            del self.positions[ts_code]
+            # 如果有部分止盈记录，也移除
+            if ts_code in self.partial_profit_taken:
+                del self.partial_profit_taken[ts_code]
+            logger.info(f"平仓: {ts_code}, 价格: {price}, 股数: {shares_to_close}, "
+                      f"收益: {profit:.2f} ({profit_pct:.2f}%), 原因: {reason}")
         
-        logger.info(f"平仓: {ts_code}, 价格: {price}, 收益: {profit:.2f} ({profit_pct:.2f}%), 原因: {reason}")
         return trade
     
     def _calculate_commission(self, value: float, is_sell: bool = False) -> float:
@@ -339,7 +395,7 @@ class RiskManager:
         
         return False, ''
     
-    def update_portfolio(self, date: str, stock_data: Dict[str, pd.DataFrame], 
+    def update_portfolio(self, date: str, stock_data: Dict[str, pd.DataFrame],
                         signals: Dict[str, Dict]) -> Tuple[List[Dict], List[Dict]]:
         """
         更新投资组合
@@ -356,6 +412,9 @@ class RiskManager:
         opened_positions = []
         closed_positions = []
         
+        # 获取当前策略ID
+        strategy_id = self.config.get('active_strategy', 'default')
+        
         # 1. 检查现有持仓是否需要平仓
         for ts_code in list(self.positions.keys()):
             # 获取当前价格
@@ -365,6 +424,33 @@ class RiskManager:
                 
                 if not current_data.empty:
                     current_price = current_data['close'].values[0]
+                    position = self.positions[ts_code]
+                    
+                    # 检查是否是激进策略下的"买入后第二天跌破20日均线"条件
+                    if strategy_id == 'aggressive':
+                        # 检查是否是买入后的第二天
+                        entry_date = position['entry_date']
+                        days_held = self._calculate_hold_days(entry_date, date)
+                        
+                        if days_held == 1:  # 买入后的第二天
+                            # 检查是否跌破20日均线
+                            if 'ema20' in current_data.columns and current_price < current_data['ema20'].values[0]:
+                                # 平仓
+                                closed_trade = self.close_position(ts_code, current_price, date, 'day_after_buy_exit')
+                                if closed_trade:
+                                    closed_positions.append(closed_trade)
+                                continue  # 已平仓，跳过后续检查
+                    
+                    # 检查部分止盈条件 (仅适用于激进策略)
+                    if strategy_id == 'aggressive':
+                        should_partial_close, partial_ratio, partial_reason = self.check_partial_profit_conditions(ts_code, current_price)
+                        
+                        if should_partial_close:
+                            # 部分平仓
+                            closed_trade = self.close_position(ts_code, current_price, date, partial_reason, partial_ratio)
+                            if closed_trade:
+                                closed_positions.append(closed_trade)
+                            continue  # 已部分平仓，跳过后续检查
                     
                     # 检查止盈止损条件
                     should_close, reason = self.check_stop_conditions(ts_code, current_price, signals)
@@ -400,10 +486,11 @@ class RiskManager:
                 
                 # 开仓
                 position = self.open_position(
-                    ts_code, 
-                    data['price'], 
-                    date, 
-                    available_capital / (available_slots - i)
+                    ts_code,
+                    data['price'],
+                    date,
+                    available_capital / (available_slots - i),
+                    signals  # 传递信号字典
                 )
                 
                 if position:
@@ -542,9 +629,52 @@ class RiskManager:
         
         return metrics
     
+    def check_partial_profit_conditions(self, ts_code: str, current_price: float) -> Tuple[bool, float, str]:
+        """
+        检查部分止盈条件 (用于激进策略)
+        
+        Args:
+            ts_code: 股票代码
+            current_price: 当前价格
+            
+        Returns:
+            (是否部分平仓, 平仓比例, 平仓原因)
+        """
+        # 检查是否持仓
+        if ts_code not in self.positions:
+            return False, 0, ''
+        
+        # 获取当前策略ID
+        strategy_id = self.config.get('active_strategy', 'default')
+        
+        # 只有激进策略才使用部分止盈
+        if strategy_id != 'aggressive':
+            return False, 0, ''
+        
+        # 获取持仓信息
+        position = self.positions[ts_code]
+        
+        # 初始化部分止盈记录
+        if ts_code not in self.partial_profit_taken:
+            self.partial_profit_taken[ts_code] = {'30%': False, '50%': False}
+        
+        # 计算当前收益率
+        profit_pct = (current_price / position['entry_price'] - 1)
+        
+        # 检查50%止盈条件 (卖出一半)
+        if profit_pct >= self.partial_take_profit_pct2 and not self.partial_profit_taken[ts_code]['50%']:
+            return True, 0.5, 'partial_take_profit_50'
+        
+        # 检查30%止盈条件 (卖出1/3)
+        if profit_pct >= self.partial_take_profit_pct1 and not self.partial_profit_taken[ts_code]['30%']:
+            return True, 1/3, 'partial_take_profit_30'
+        
+        return False, 0, ''
+    
     def reset(self):
         """重置风险管理器"""
         self.current_capital = self.initial_capital
         self.positions = {}
         self.trades = []
+        self.partial_profit_taken = {}
         logger.info("风险管理器已重置")

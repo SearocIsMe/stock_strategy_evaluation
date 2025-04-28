@@ -623,11 +623,12 @@ class DataFetcher:
 
             # 使用指定日期或回测结束日期
             ref_date = date or self.end_date
-            # 检查日期是否为交易日，如果不是则跳过
+            
+            # 检查日期是否为交易日
             if not self._is_trade_date(ref_date):
-                logger.debug(f"日期 {ref_date} 不是交易日，跳过")
-                stats['no_data'] += 1
-                continue
+                nearest_trade_date = self._get_nearest_trade_date(ref_date)
+                logger.info(f"日期 {ref_date} 不是交易日，使用最近的交易日 {nearest_trade_date} 获取基本面数据")
+                ref_date = nearest_trade_date
 
             for ts_code in batch:
                 # 获取基本面数据
@@ -760,28 +761,55 @@ class DataFetcher:
         try:
             # 获取当前日期
             now = datetime.now()
-            
-            # 尝试获取最近30天的交易数据
             end_date = now.strftime('%Y%m%d')
+            
+            # 获取30天前的日期作为开始日期
             start_date = (now - timedelta(days=30)).strftime('%Y%m%d')
             
-            # 使用上证指数（000001.SH）作为参考获取交易日
-            # 使用daily API而不是trade_cal
-            df_daily = self.pro.daily(
-                ts_code='000001.SH',
-                start_date=start_date,
-                end_date=end_date
-            )
+            # 获取交易日历
+            if not self.trade_dates:
+                self.get_trade_dates(start_date, end_date)
             
-            if not df_daily.empty:
-                # 按日期降序排序，获取最近的交易日
-                df_daily = df_daily.sort_values('trade_date', ascending=False)
-                return df_daily['trade_date'].iloc[0]
-            else:
-                # 如果获取失败，返回昨天的日期
+            # 如果交易日历为空，尝试使用API获取
+            if not self.trade_dates:
+                logger.warning("交易日历为空，尝试使用API获取最近交易日")
+                try:
+                    # 使用上证指数（000001.SH）作为参考获取交易日
+                    df_daily = self.pro.daily(
+                        ts_code='000001.SH',
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                    
+                    if not df_daily.empty:
+                        # 按日期降序排序，获取最近的交易日
+                        df_daily = df_daily.sort_values('trade_date', ascending=False)
+                        return df_daily['trade_date'].iloc[0]
+                except Exception as e:
+                    logger.error(f"API获取最近交易日失败: {e}")
+                
+                # 如果API获取失败，返回昨天的日期
                 yesterday = (now - timedelta(days=1)).strftime('%Y%m%d')
                 logger.warning(f"无法获取最近交易日，使用昨天日期: {yesterday}")
                 return yesterday
+            
+            # 将当前日期标准化为YYYYMMDD格式
+            current_date_str = end_date
+            current_date = int(current_date_str)
+            
+            # 按降序排序交易日历（从新到旧）
+            sorted_trade_dates = sorted(self.trade_dates, reverse=True)
+            
+            # 遍历交易日历，找到第一个小于等于当前日期的交易日
+            for trade_date in sorted_trade_dates:
+                if int(trade_date) <= current_date:
+                    logger.debug(f"找到最近的交易日: {trade_date}")
+                    return trade_date
+            
+            # 如果没有找到合适的交易日，返回昨天的日期
+            yesterday = (now - timedelta(days=1)).strftime('%Y%m%d')
+            logger.warning(f"在交易日历中未找到合适的交易日，使用昨天日期: {yesterday}")
+            return yesterday
                 
         except Exception as e:
             # 如果出错，返回昨天的日期
@@ -831,33 +859,65 @@ class DataFetcher:
             if '-' in date_str:
                 date_str = date_str.replace('-', '')
             
-            # 向前后各查找15天，以找到最近的交易日
+            # 检查日期是否已经是交易日
+            if self._is_trade_date(date_str):
+                return date_str
+            
+            # 获取向前后各30天的日期范围
             date_obj = datetime.strptime(date_str, '%Y%m%d')
-            start_date = (date_obj - timedelta(days=15)).strftime('%Y%m%d')
-            end_date = (date_obj + timedelta(days=15)).strftime('%Y%m%d')
+            start_date = (date_obj - timedelta(days=30)).strftime('%Y%m%d')
+            end_date = (date_obj + timedelta(days=30)).strftime('%Y%m%d')
             
-            # 使用上证指数（000001.SH）作为参考获取交易日
-            # 使用daily API而不是trade_cal
-            df_daily = self.pro.daily(
-                ts_code='000001.SH',
-                start_date=start_date,
-                end_date=end_date
-            )
+            # 获取交易日历
+            if not self.trade_dates:
+                self.get_trade_dates(start_date, end_date)
             
-            if not df_daily.empty:
-                # 将日期转换为数值进行比较
-                target_date = int(date_str)
-                df_daily['date_diff'] = abs(df_daily['trade_date'].astype(int) - target_date)
+            # 如果交易日历为空，尝试使用API获取
+            if not self.trade_dates:
+                logger.warning(f"交易日历为空，尝试使用API获取日期 {date_str} 附近的交易日")
+                try:
+                    # 使用上证指数（000001.SH）作为参考获取交易日
+                    df_daily = self.pro.daily(
+                        ts_code='000001.SH',
+                        start_date=start_date,
+                        end_date=end_date
+                    )
+                    
+                    if not df_daily.empty:
+                        # 将日期转换为数值进行比较
+                        target_date = int(date_str)
+                        df_daily['date_diff'] = abs(df_daily['trade_date'].astype(int) - target_date)
+                        
+                        # 按日期差排序，获取最近的交易日
+                        df_daily = df_daily.sort_values('date_diff')
+                        nearest_date = df_daily['trade_date'].iloc[0]
+                        
+                        logger.debug(f"找到日期 {date_str} 最近的交易日: {nearest_date}")
+                        return nearest_date
+                except Exception as e:
+                    logger.error(f"API获取最近交易日失败: {e}")
                 
-                # 按日期差排序，获取最近的交易日
-                df_daily = df_daily.sort_values('date_diff')
-                nearest_date = df_daily['trade_date'].iloc[0]
-                
-                logger.debug(f"找到日期 {date_str} 最近的交易日: {nearest_date}")
-                return nearest_date
-            else:
                 logger.warning(f"无法获取日期 {date_str} 附近的交易数据，使用原始日期")
                 return date_str
+            
+            # 将目标日期转换为整数
+            target_date = int(date_str)
+            
+            # 创建一个包含日期差的列表
+            date_diffs = [(abs(int(d) - target_date), d) for d in self.trade_dates]
+            
+            # 按日期差排序
+            date_diffs.sort(key=lambda x: x[0])
+            
+            # 返回日期差最小的交易日
+            if date_diffs:
+                nearest_date = date_diffs[0][1]
+                logger.debug(f"找到日期 {date_str} 最近的交易日: {nearest_date}")
+                return nearest_date
+            
+            # 如果没有找到合适的交易日，使用原始日期
+            logger.warning(f"在交易日历中未找到日期 {date_str} 附近的交易日，使用原始日期")
+            return date_str
                 
         except Exception as e:
             logger.error(f"获取最近交易日出错: {e}，使用原始日期: {date_str}")
@@ -921,6 +981,12 @@ class DataFetcher:
         
         # 计算RSI指标
         self._calculate_rsi(df)
+        
+        # 计算涨停指标 (用于激进策略)
+        self._calculate_limit_up(df)
+        
+        # 计算月线MACD指标 (用于激进策略)
+        self._calculate_monthly_macd(df)
         
         return df
     
@@ -995,9 +1061,21 @@ class DataFetcher:
     
     def _calculate_ema(self, df: pd.DataFrame) -> None:
         """计算EMA指标"""
+        # 获取参数
         ema_length = self.config['ema']['length']
+        
+        # 计算EMA144 (原有指标)
         df['ema144'] = df['close'].ewm(span=ema_length, adjust=False).mean()
         df['price_above_ema'] = np.where(df['close'] > df['ema144'], 1, 0)
+        
+        # 计算EMA20 (新增指标，用于激进策略)
+        df['ema20'] = df['close'].ewm(span=20, adjust=False).mean()
+        
+        # 计算价格是否在EMA20的±5%范围内
+        df['price_near_ema20'] = np.where(
+            abs(df['close'] - df['ema20']) / df['ema20'] <= 0.05,
+            1, 0
+        )
     
     def _calculate_ichimoku(self, df: pd.DataFrame) -> None:
         """计算Ichimoku云层指标"""
@@ -1086,6 +1164,24 @@ class DataFetcher:
         
         # 计算换手率信号
         df['turnover_signal'] = np.where(df['turnover_rate'] >= turnover_threshold, 1, 0)
+        
+        # 计算前一日换手率 (用于激进策略)
+        df['prev_turnover_rate'] = df['turnover_rate'].shift(1)
+        df['high_turnover'] = np.where(df['prev_turnover_rate'] > 3.0, 1, 0)
+        
+        # 计算10日均量线 (用于激进策略)
+        df['volume_ma10'] = df['vol'].rolling(window=10).mean()
+        
+        # 计算量能是否为10日均量的1.2倍 (用于激进策略)
+        df['volume_1_2x_ma10'] = np.where(df['vol'] >= df['volume_ma10'] * 1.2, 1, 0)
+        
+        # 计算量能放大信号 (用于激进策略)
+        # 当日成交量大于10日均量的1.2倍，且前一日成交量小于等于10日均量
+        df['volume_expansion'] = np.where(
+            (df['vol'] > df['volume_ma10'] * 1.2) &
+            (df['vol'].shift(1) <= df['volume_ma10'].shift(1)),
+            1, 0
+        )
     
     def _calculate_chip_concentration(self, df: pd.DataFrame) -> None:
         """
@@ -1213,6 +1309,243 @@ class DataFetcher:
         df.loc[:period, 'rsi'] = np.nan
         df.loc[:period, 'overbought'] = 0
 
+    def _calculate_limit_up(self, df: pd.DataFrame) -> None:
+        """
+        计算涨停指标
+        
+        检测过去11天内是否有涨停，并排除三连板
+        """
+        if len(df) < 11:
+            df['limit_up_in_11_days'] = 0
+            df['three_consecutive_limit_up'] = 0
+            return
+            
+        # 判断是否涨停
+        # 中国A股涨停规则：
+        # - 普通股票：10%
+        # - ST股票：5%
+        # - 科创板/创业板：20%
+        
+        # 检查股票代码前缀来确定涨停幅度
+        ts_code = df['ts_code'].iloc[0] if 'ts_code' in df.columns else ''
+        
+        # 根据股票代码确定涨停幅度
+        if ts_code.startswith('688') or ts_code.startswith('300'):
+            # 科创板或创业板
+            limit_up_threshold = 19.5  # 略小于20%，考虑到可能的小数点误差
+        elif 'ST' in ts_code or 'st' in ts_code:
+            # ST股票
+            limit_up_threshold = 4.8  # 略小于5%
+        else:
+            # 普通股票
+            limit_up_threshold = 9.5  # 略小于10%
+            
+        # 判断是否涨停 - 使用收盘价接近涨停价的方式判断
+        # 涨停价通常是前一日收盘价 * (1 + 涨停比例)
+        # 这里我们简化为当日涨幅是否达到涨停阈值
+        df['is_limit_up'] = np.where(df['pct_chg'] >= limit_up_threshold, 1, 0)
+        
+        # 添加日志输出
+        limit_up_days = df[df['is_limit_up'] == 1]
+        if not limit_up_days.empty:
+            logger.debug(f"检测到涨停日: {limit_up_days['trade_date'].tolist()}, 涨停阈值: {limit_up_threshold}%")
+        
+        # 计算过去11天内是否有涨停
+        # 使用rolling window检查过去11天
+        df['limit_up_count_11d'] = df['is_limit_up'].rolling(window=11).sum().shift(1).fillna(0)
+        
+        # 如果过去11天内有涨停，则标记为1
+        df['limit_up_in_11_days'] = np.where(df['limit_up_count_11d'] >= 1, 1, 0)
+        
+        # 计算连续涨停天数
+        df['consecutive_limit_up'] = 0
+        consecutive_days = 0
+        
+        for i in range(1, len(df)):
+            if df['is_limit_up'].iloc[i-1] == 1:
+                consecutive_days += 1
+            else:
+                consecutive_days = 0
+            df.loc[df.index[i], 'consecutive_limit_up'] = consecutive_days
+        
+        # 标记三连板或以上
+        df['three_consecutive_limit_up'] = np.where(df['consecutive_limit_up'] >= 3, 1, 0)
+        
+        # 排除三连板，只有过去11天内有涨停且当前不是三连板的股票才有效
+        df['limit_up_valid'] = np.where(
+            (df['limit_up_in_11_days'] == 1) & (df['three_consecutive_limit_up'] == 0),
+            1, 0
+        )
+        
+        # 添加日志输出
+        valid_days = df[df['limit_up_valid'] == 1]
+        if not valid_days.empty:
+            logger.debug(f"有效涨停日: {valid_days['trade_date'].tolist()}, "
+                       f"过去11天涨停次数: {valid_days['limit_up_count_11d'].tolist()}")
+    
+    def _get_monthly_data(self, ts_code: str, start_date: str = None, end_date: str = None) -> pd.DataFrame:
+        """
+        使用tushare月线接口获取月度数据
+        
+        Args:
+            ts_code: 股票代码
+            start_date: 开始日期
+            end_date: 结束日期
+            
+        Returns:
+            月线数据DataFrame
+        """
+        try:
+            # 确保日期格式正确
+            if start_date and '-' in start_date:
+                start_date = start_date.replace('-', '')
+            if end_date and '-' in end_date:
+                end_date = end_date.replace('-', '')
+            
+            # 使用tushare的月线接口获取数据
+            monthly_df = self.pro.monthly(
+                ts_code=ts_code,
+                start_date=start_date,
+                end_date=end_date,
+                fields='ts_code,trade_date,open,high,low,close,vol,amount'
+            )
+            
+            # 按日期排序
+            if not monthly_df.empty:
+                monthly_df.sort_values('trade_date', inplace=True)
+                logger.debug(f"获取到{ts_code}的月线数据，共{len(monthly_df)}条记录")
+            else:
+                logger.warning(f"未获取到{ts_code}的月线数据")
+                
+            return monthly_df
+            
+        except Exception as e:
+            logger.error(f"获取月线数据失败: {e}")
+            return pd.DataFrame()
+    
+    def _calculate_monthly_macd(self, df: pd.DataFrame) -> None:
+        """
+        计算月线MACD指标
+        
+        使用参数(6, 13, 5)
+        """
+        if len(df) < 30:  # 至少需要30天数据才能计算月线指标
+            df['monthly_macd_line'] = 0
+            df['monthly_signal_line'] = 0
+            df['monthly_macd_hist'] = 0
+            df['monthly_macd_golden_cross'] = 0
+            return
+        
+        try:
+            # 获取股票代码和日期范围
+            ts_code = df['ts_code'].iloc[0] if 'ts_code' in df.columns else None
+            if ts_code is None:
+                logger.warning("无法获取股票代码，跳过月线MACD计算")
+                return
+                
+            # 获取日期范围，向前多取12个月以确保有足够的数据计算MACD
+            min_date = df['trade_date'].min()
+            max_date = df['trade_date'].max()
+            
+            # 将日期转换为datetime对象
+            if isinstance(min_date, str):
+                min_date_obj = datetime.strptime(min_date, '%Y%m%d')
+            else:
+                min_date_obj = datetime.strptime(min_date.strftime('%Y%m%d'), '%Y%m%d')
+                
+            # 向前推12个月
+            extended_min_date = (min_date_obj - timedelta(days=365)).strftime('%Y%m%d')
+            
+            # 获取月线数据
+            monthly_df = self._get_monthly_data(ts_code, extended_min_date, max_date)
+            
+            if monthly_df.empty:
+                logger.warning(f"未获取到{ts_code}的月线数据，使用日线数据重采样")
+                # 如果无法获取月线数据，回退到使用日线数据重采样
+                df['date'] = pd.to_datetime(df['trade_date'])
+                df.set_index('date', inplace=True)
+                monthly_close = df['close'].resample('ME').last()
+            else:
+                # 使用月线数据
+                monthly_df['date'] = pd.to_datetime(monthly_df['trade_date'])
+                monthly_df.set_index('date', inplace=True)
+                monthly_close = monthly_df['close']
+            
+            # 计算月线MACD参数
+            fast_period = self.config.get('monthly_macd', {}).get('fast_period', 6)
+            slow_period = self.config.get('monthly_macd', {}).get('slow_period', 13)
+            signal_period = self.config.get('monthly_macd', {}).get('signal_period', 5)
+            
+            logger.debug(f"计算月线MACD，参数: fast={fast_period}, slow={slow_period}, signal={signal_period}")
+            
+            # 计算月线EMA
+            ema_fast = monthly_close.ewm(span=fast_period, adjust=False).mean()
+            ema_slow = monthly_close.ewm(span=slow_period, adjust=False).mean()
+            
+            # 计算MACD线
+            macd_line = ema_fast - ema_slow
+            
+            # 计算信号线
+            signal_line = macd_line.ewm(span=signal_period, adjust=False).mean()
+            
+            # 计算MACD柱状图
+            macd_hist = macd_line - signal_line
+            
+            # 准备将月线数据映射回日线数据
+            if 'date' not in df.columns:
+                df['date'] = pd.to_datetime(df['trade_date'])
+                
+            # 创建月末日期到MACD值的映射
+            monthly_data = pd.DataFrame({
+                'macd_line': macd_line,
+                'signal_line': signal_line,
+                'macd_hist': macd_hist
+            })
+            
+            # 为每个日期分配对应月份的MACD值
+            df['year_month'] = df['date'].dt.to_period('M')
+            monthly_data['year_month'] = monthly_data.index.to_period('M')
+            
+            # 初始化MACD列
+            df['monthly_macd_line'] = 0.0
+            df['monthly_signal_line'] = 0.0
+            df['monthly_macd_hist'] = 0.0
+            
+            # 映射月度MACD值到日线数据
+            for ym in monthly_data['year_month'].unique():
+                if ym in df['year_month'].values:
+                    m_data = monthly_data[monthly_data['year_month'] == ym].iloc[-1]
+                    df.loc[df['year_month'] == ym, 'monthly_macd_line'] = m_data['macd_line']
+                    df.loc[df['year_month'] == ym, 'monthly_signal_line'] = m_data['signal_line']
+                    df.loc[df['year_month'] == ym, 'monthly_macd_hist'] = m_data['macd_hist']
+            
+            # 计算金叉信号 (MACD线上穿信号线)
+            df['monthly_macd_golden_cross'] = 0
+            
+            # 按月份分组检测金叉
+            for i in range(1, len(monthly_data)):
+                current_month = monthly_data.index[i].to_period('M')
+                if (monthly_data['macd_line'].iloc[i] > monthly_data['signal_line'].iloc[i] and
+                    monthly_data['macd_line'].iloc[i-1] <= monthly_data['signal_line'].iloc[i-1]):
+                    # 找到当前月份的所有日期
+                    if current_month in df['year_month'].values:
+                        df.loc[df['year_month'] == current_month, 'monthly_macd_golden_cross'] = 1
+                        logger.debug(f"检测到月线MACD金叉: {current_month}")
+            
+            # 清理临时列
+            df.drop(columns=['year_month'], inplace=True)
+            if 'date' not in df.columns:
+                df['date'] = pd.to_datetime(df['trade_date'])
+                
+            logger.debug(f"月线MACD计算完成，金叉日期: {df[df['monthly_macd_golden_cross'] == 1]['trade_date'].tolist()}")
+            
+        except Exception as e:
+            logger.error(f"计算月线MACD出错: {e}")
+            df['monthly_macd_line'] = 0
+            df['monthly_signal_line'] = 0
+            df['monthly_macd_hist'] = 0
+            df['monthly_macd_golden_cross'] = 0
+    
     def get_batch_stock_data(self, ts_codes: List[str], start_date: str = None,
                             end_date: str = None, refresh: bool = False) -> Dict[str, pd.DataFrame]:
         """

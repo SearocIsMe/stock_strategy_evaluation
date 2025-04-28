@@ -67,7 +67,7 @@ class SignalGenerator:
             raise
     
     def generate_signals(self, stock_data: Dict[str, pd.DataFrame], date: str,
-                        current_positions: Dict[str, Dict] = None) -> Dict[str, Dict]:
+                        current_positions: Dict[str, Dict] = None, strategy_id: str = None) -> Dict[str, Dict]:
         """
         为指定日期生成所有股票的信号
         
@@ -75,10 +75,16 @@ class SignalGenerator:
             stock_data: 股票数据字典 {股票代码: 数据DataFrame}
             date: 日期字符串 (YYYYMMDD)
             current_positions: 当前持仓 {股票代码: 持仓信息}，用于卖出信号约束
+            strategy_id: 策略ID，默认使用配置中的active_strategy
             
         Returns:
             信号字典 {股票代码: {'signal': 信号, 'score': 分数, ...}}
         """
+        # 如果未指定策略ID，则使用配置中的active_strategy
+        if strategy_id is None:
+            strategy_id = self.config.get('active_strategy', 'default')
+            
+        logger.debug(f"使用策略ID: {strategy_id} 生成信号")
         signals = {}
         total_stocks = len(stock_data)
         valid_stocks = 0
@@ -88,32 +94,7 @@ class SignalGenerator:
         # 初始化当前持仓
         if current_positions is None:
             current_positions = {}
-        
-        # 检查当天是否为交易日
-        try:
-            # 确保日期格式正确 (YYYYMMDD)
-            formatted_date = date.replace('-', '')
-            
-            # 使用trade_cal接口检查所有交易所在目标日期是否开市
-            df_trade_cal = self.data_fetcher.pro.trade_cal(exchange='', start_date=formatted_date, end_date=formatted_date)
-            
-            # 详细记录交易日历数据以便调试
-            if not df_trade_cal.empty:
-                is_open = df_trade_cal['is_open'].iloc[0]
-                logger.info(f"交易日历检查: 日期={date}, is_open={is_open}")
-                
-                # 检查是否有数据并且is_open为1 (1表示交易日，0表示非交易日)
-                if is_open != 1:
-                    logger.info(f"日期 {date} 不是交易日 (is_open={is_open})，跳过信号生成")
-                    return signals
-            else:
-                logger.warning(f"日期 {date} 的交易日历数据为空，假定为非交易日")
-                return signals
-                
-            logger.info(f"开始为日期 {date} 生成信号，共 {total_stocks} 只股票")
-        except Exception as e:
-            logger.error(f"检查交易日失败: {e}")
-            logger.info(f"开始为日期 {date} 生成信号，共 {total_stocks} 只股票（未验证交易日）")
+
         
         for ts_code, df in stock_data.items():
             # 确保数据不为空且包含指定日期
@@ -129,7 +110,7 @@ class SignalGenerator:
             date_idx = df[df['trade_date'] == date].index[0]
             
             # 确保有足够的历史数据
-            if date_idx < 20:  # 至少需要20天数据
+            if date_idx < 3:  # 至少需要20天数据
                 continue
             
             valid_stocks += 1
@@ -138,14 +119,14 @@ class SignalGenerator:
             current_data = df.iloc[date_idx]
             
             # 生成买入信号
-            buy_signal = self._generate_buy_signal(df, date_idx)
+            buy_signal = self._generate_buy_signal(df, date_idx, strategy_id)
             if buy_signal == 1:
                 stocks_with_buy_signal += 1
             
             # 生成卖出信号 - 只有当股票在当前持仓中时才考虑卖出信号
             sell_signal = 0
             if ts_code in current_positions:
-                sell_signal = self._generate_sell_signal(df, date_idx)
+                sell_signal = self._generate_sell_signal(df, date_idx, strategy_id)
                 if sell_signal == 1:
                     stocks_with_sell_signal += 1
             
@@ -184,27 +165,46 @@ class SignalGenerator:
                 ema20_deviation_score = max(0, 10 - deviation)
             
             # 存储信号
-            signals[ts_code] = {
+            # 创建基本信号字典
+            signal_dict = {
                 'buy_signal': buy_signal,
                 'sell_signal': sell_signal,
                 'score': score,
                 'price': current_data['close'],
                 'date': date,
                 'rsi': current_data['rsi'] if 'rsi' in current_data else None,
-                'all_uptrend': current_data['all_uptrend'] if 'all_uptrend' in current_data else None,
-                'price_above_ema': current_data['price_above_ema'] if 'price_above_ema' in current_data else None,
-                'price_above_cloud': current_data['price_above_cloud'] if 'price_above_cloud' in current_data else None,
-                'weekly_condition': current_data['weekly_condition'] if 'weekly_condition' in current_data else None,
-                'volume_signal': current_data['volume_signal'] if 'volume_signal' in current_data else None,
-                'turnover_signal': current_data['turnover_signal'] if 'turnover_signal' in current_data else None,
-                'cost_valid': current_data['cost_valid'] if 'cost_valid' in current_data else None,
-                'cost_valid_ratio': current_data['cost_valid_ratio'] if 'cost_valid_ratio' in current_data else None,
-                'price_deviation_ratio': current_data['price_deviation_ratio'] if 'price_deviation_ratio' in current_data else None,
                 'ema20_deviation_score': ema20_deviation_score,
                 'roe_pb_score': roe_pb_score
             }
+            
+            # 根据策略ID添加不同的指标
+            if strategy_id == 'aggressive':
+                # 添加激进策略特有的指标
+                signal_dict.update({
+                    'limit_up_valid': current_data['limit_up_valid'] if 'limit_up_valid' in current_data else None,
+                    'monthly_macd_golden_cross': current_data['monthly_macd_golden_cross'] if 'monthly_macd_golden_cross' in current_data else None,
+                    'price_near_ema20': current_data['price_near_ema20'] if 'price_near_ema20' in current_data else None,
+                    'volume_expansion': current_data['volume_expansion'] if 'volume_expansion' in current_data else None,
+                    'high_turnover': current_data['high_turnover'] if 'high_turnover' in current_data else None,
+                    'price_above_ema20': ema20_deviation_score if 'ema20' in current_data else None
+                })
+            else:
+                # 添加默认策略和保守策略的指标
+                signal_dict.update({
+                    'all_uptrend': current_data['all_uptrend'] if 'all_uptrend' in current_data else None,
+                    'price_above_ema': current_data['price_above_ema'] if 'price_above_ema' in current_data else None,
+                    'price_above_cloud': current_data['price_above_cloud'] if 'price_above_cloud' in current_data else None,
+                    'weekly_condition': current_data['weekly_condition'] if 'weekly_condition' in current_data else None,
+                    'volume_signal': current_data['volume_signal'] if 'volume_signal' in current_data else None,
+                    'turnover_signal': current_data['turnover_signal'] if 'turnover_signal' in current_data else None,
+                    'cost_valid': current_data['cost_valid'] if 'cost_valid' in current_data else None,
+                    'cost_valid_ratio': current_data['cost_valid_ratio'] if 'cost_valid_ratio' in current_data else None,
+                    'price_deviation_ratio': current_data['price_deviation_ratio'] if 'price_deviation_ratio' in current_data else None
+                })
+            
+            signals[ts_code] = signal_dict
         
-        logger.info(f"日期 {date} 信号生成完成:")
+        logger.info(f"日期 {date} 信号生成完成 (策略: {strategy_id}):")
         logger.info(f"  - 有效股票: {valid_stocks}/{total_stocks}")
         logger.info(f"  - 买入信号: {stocks_with_buy_signal} 只")
         logger.info(f"  - 卖出信号: {stocks_with_sell_signal} 只")
@@ -212,25 +212,50 @@ class SignalGenerator:
         # 打印评分最高的前10只股票
         if signals:
             top_stocks = sorted(signals.items(), key=lambda x: x[1]['score'] if 'score' in x[1] else 0, reverse=True)[:10]
-            logger.info(f"评分最高的前10只股票:")
+            logger.info(f"评分最高的前10只股票 (策略: {strategy_id}):")
             for i, (ts_code, data) in enumerate(top_stocks, 1):
                 # 基本信息
                 log_msg = f"  {i}. {ts_code}: 评分={data['score']:.2f}, 买入信号={data['buy_signal']}, 卖出信号={data['sell_signal']}"
                 
-                # 添加详细指标信息
-                indicators = [
-                    f"RSI={data['rsi']:.2f}" if data['rsi'] is not None else "RSI=N/A",
-                    f"上升趋势={data['all_uptrend']}" if data['all_uptrend'] is not None else "上升趋势=N/A",
-                    f"价格>EMA={data['price_above_ema']}" if data['price_above_ema'] is not None else "价格>EMA=N/A",
-                    f"价格>云层={data['price_above_cloud']}" if data['price_above_cloud'] is not None else "价格>云层=N/A",
-                    f"周线条件={data['weekly_condition']}" if data['weekly_condition'] is not None else "周线条件=N/A",
-                    f"成交量信号={data['volume_signal']}" if data['volume_signal'] is not None else "成交量信号=N/A",
-                    f"换手率信号={data['turnover_signal']}" if data['turnover_signal'] is not None else "换手率信号=N/A",
-                    f"筹码集中比率={data.get('cost_valid_ratio', 0):.2f}" if 'cost_valid_ratio' in data else "筹码集中比率=N/A",
-                    f"价格偏离比率={data.get('price_deviation_ratio', 0):.2f}" if 'price_deviation_ratio' in data else "价格偏离比率=N/A",
-                    f"EMA20乖离率评分={data.get('ema20_deviation_score', 0):.2f}",
-                    f"ROE/PB评分={data.get('roe_pb_score', 0):.2f}"
-                ]
+                # 添加详细指标信息，根据策略ID显示不同的指标
+                if strategy_id == 'aggressive':
+                    # 激进策略的指标
+                    indicators = [
+                        f"RSI={data['rsi']:.2f}" if data['rsi'] is not None else "RSI=N/A",
+                        f"涨停={data.get('limit_up_valid', 0)}" if 'limit_up_valid' in data else "涨停=N/A",
+                        f"月线MACD金叉={data.get('monthly_macd_golden_cross', 0)}" if 'monthly_macd_golden_cross' in data else "月线MACD金叉=N/A",
+                        f"价格接近EMA20={data.get('price_near_ema20', 0)}" if 'price_near_ema20' in data else "价格接近EMA20=N/A",
+                        f"量能扩张={data.get('volume_expansion', 0)}" if 'volume_expansion' in data else "量能扩张=N/A",
+                        f"高换手率={data.get('high_turnover', 0)}" if 'high_turnover' in data else "高换手率=N/A",
+                        f"价格>EMA20={data.get('price_above_ema20', 0)}" if 'price_above_ema20' in data else "价格>EMA20=N/A",
+                        f"EMA20乖离率评分={data.get('ema20_deviation_score', 0):.2f}",
+                        f"ROE/PB评分={data.get('roe_pb_score', 0):.2f}"
+                    ]
+                elif strategy_id == 'conservative':
+                    # 保守策略的指标
+                    indicators = [
+                        f"RSI={data['rsi']:.2f}" if data['rsi'] is not None else "RSI=N/A",
+                        f"上升趋势={data['all_uptrend']}" if data['all_uptrend'] is not None else "上升趋势=N/A",
+                        f"价格>EMA={data['price_above_ema']}" if data['price_above_ema'] is not None else "价格>EMA=N/A",
+                        f"价格>云层={data['price_above_cloud']}" if data['price_above_cloud'] is not None else "价格>云层=N/A",
+                        f"EMA20乖离率评分={data.get('ema20_deviation_score', 0):.2f}",
+                        f"ROE/PB评分={data.get('roe_pb_score', 0):.2f}"
+                    ]
+                else:
+                    # 默认策略的指标
+                    indicators = [
+                        f"RSI={data['rsi']:.2f}" if data['rsi'] is not None else "RSI=N/A",
+                        f"上升趋势={data['all_uptrend']}" if data['all_uptrend'] is not None else "上升趋势=N/A",
+                        f"价格>EMA={data['price_above_ema']}" if data['price_above_ema'] is not None else "价格>EMA=N/A",
+                        f"价格>云层={data['price_above_cloud']}" if data['price_above_cloud'] is not None else "价格>云层=N/A",
+                        f"周线条件={data['weekly_condition']}" if data['weekly_condition'] is not None else "周线条件=N/A",
+                        f"成交量信号={data['volume_signal']}" if data['volume_signal'] is not None else "成交量信号=N/A",
+                        f"换手率信号={data['turnover_signal']}" if data['turnover_signal'] is not None else "换手率信号=N/A",
+                        f"筹码集中比率={data.get('cost_valid_ratio', 0):.2f}" if 'cost_valid_ratio' in data else "筹码集中比率=N/A",
+                        f"价格偏离比率={data.get('price_deviation_ratio', 0):.2f}" if 'price_deviation_ratio' in data else "价格偏离比率=N/A",
+                        f"EMA20乖离率评分={data.get('ema20_deviation_score', 0):.2f}",
+                        f"ROE/PB评分={data.get('roe_pb_score', 0):.2f}"
+                    ]
                 
                 # 添加指标信息到日志
                 log_msg += "\n    " + ", ".join(indicators)
@@ -238,13 +263,14 @@ class SignalGenerator:
         
         return signals
     
-    def _generate_buy_signal(self, df: pd.DataFrame, idx: int) -> int:
+    def _generate_buy_signal(self, df: pd.DataFrame, idx: int, strategy_id: str = None) -> int:
         """
         生成买入信号
         
         Args:
             df: 股票数据
             idx: 当前日期索引
+            strategy_id: 策略ID，默认使用配置中的active_strategy
             
         Returns:
             1表示买入，0表示不操作
@@ -253,6 +279,15 @@ class SignalGenerator:
         if idx < 0 or idx >= len(df):
             return 0
         
+        # 如果未指定策略ID，则使用配置中的active_strategy
+        if strategy_id is None:
+            strategy_id = self.config.get('active_strategy', 'default')
+        
+        # 如果是激进策略，使用激进策略的买入信号逻辑
+        if strategy_id == 'aggressive':
+            return self._generate_aggressive_buy_signal(df, idx)
+        
+        # 默认策略和保守策略使用原有逻辑
         current = df.iloc[idx]
         
         # 策略1: 三重Supertrend过滤 + EMA144 + Ichimoku云层
@@ -285,13 +320,69 @@ class SignalGenerator:
         
         return buy_signal
     
-    def _generate_sell_signal(self, df: pd.DataFrame, idx: int) -> int:
+    def _generate_aggressive_buy_signal(self, df: pd.DataFrame, idx: int) -> int:
+        """
+        生成激进策略的买入信号
+        
+        Args:
+            df: 股票数据
+            idx: 当前日期索引
+            
+        Returns:
+            1表示买入，0表示不操作
+        """
+        # 确保索引有效
+        if idx < 0 or idx >= len(df) :  # 至少需要20天数据
+            return 0
+        
+        current = df.iloc[idx]
+        
+        # 1. 前面11天涨停个股，排除三连板的个股
+        limit_up_condition = ('limit_up_valid' in current and current['limit_up_valid'] == 1)
+        
+        # 2. 月线上MACD出现金叉的个股
+        macd_condition = ('monthly_macd_golden_cross' in current and current['monthly_macd_golden_cross'] == 1)
+        
+        # 3. 日线价格在20日EMA附近，量能出现1.2倍10日均量线
+        ema_price_condition = ('price_near_ema20' in current and current['price_near_ema20'] == 1)
+        volume_condition = ('volume_expansion' in current and current['volume_expansion'] == 1)
+        
+        # 4. 日线上一日换手率>3%
+        turnover_condition = ('high_turnover' in current and current['high_turnover'] == 1)
+        
+        # 5. 持仓信号: 价格在EMA20上方
+        position_condition = ('close' in current and 'ema20' in current and current['close'] > current['ema20'])
+        
+        # 综合信号: 满足所有条件
+        buy_signal = 1 if (limit_up_condition and
+                           macd_condition and
+                           ema_price_condition and
+                           volume_condition and
+                           turnover_condition and
+                           position_condition) else 0
+        
+        # 添加详细日志，打印所有条件
+        ts_code = df['ts_code'].iloc[0] if 'ts_code' in df.columns else 'unknown'
+        date = df['trade_date'].iloc[idx] if 'trade_date' in df.columns else 'unknown'
+        
+        logger.info(f"激进策略买入信号 [{ts_code}] [{date}]: 信号={buy_signal}, "
+                   f"涨停={limit_up_condition}, "
+                   f"月线MACD金叉={macd_condition}, "
+                   f"价格接近EMA20={ema_price_condition}, "
+                   f"量能扩张={volume_condition}, "
+                   f"高换手率={turnover_condition}, "
+                   f"价格>EMA20={position_condition}")
+        
+        return buy_signal
+    
+    def _generate_sell_signal(self, df: pd.DataFrame, idx: int, strategy_id: str = None) -> int:
         """
         生成卖出信号
         
         Args:
             df: 股票数据
             idx: 当前日期索引
+            strategy_id: 策略ID，默认使用配置中的active_strategy
             
         Returns:
             1表示卖出，0表示不操作
@@ -300,6 +391,15 @@ class SignalGenerator:
         if idx < 1 or idx >= len(df):  # 需要至少一天的历史数据
             return 0
         
+        # 如果未指定策略ID，则使用配置中的active_strategy
+        if strategy_id is None:
+            strategy_id = self.config.get('active_strategy', 'default')
+        
+        # 如果是激进策略，使用激进策略的卖出信号逻辑
+        if strategy_id == 'aggressive':
+            return self._generate_aggressive_sell_signal(df, idx)
+        
+        # 默认策略和保守策略使用原有逻辑
         current = df.iloc[idx]
         prev = df.iloc[idx-1]
         
@@ -315,6 +415,43 @@ class SignalGenerator:
         
         # 综合止损信号
         sell_signal = 1 if stop_condition1 or stop_condition2 or stop_condition3 else 0
+        
+        return sell_signal
+    
+    def _generate_aggressive_sell_signal(self, df: pd.DataFrame, idx: int) -> int:
+        """
+        生成激进策略的卖出信号
+        
+        Args:
+            df: 股票数据
+            idx: 当前日期索引
+            
+        Returns:
+            1表示卖出，0表示不操作
+        """
+        # 确保索引有效
+        if idx < 1 or idx >= len(df):  # 需要至少一天的历史数据
+            return 0
+        
+        current = df.iloc[idx]
+        prev = df.iloc[idx-1]
+        
+        # 1. 平仓信号: 价格跌破20日EMA
+        exit_condition = ('close' in current and 'ema20' in current and
+                          current['close'] < current['ema20'])
+        
+        # 2. 当日买入后，第二日就跌破20日均线，就平仓
+        # 这个条件需要在风险管理器中实现，因为需要知道买入日期
+        
+        # 综合卖出信号
+        sell_signal = 1 if exit_condition else 0
+        
+        # 添加详细日志，打印所有条件
+        ts_code = df['ts_code'].iloc[0] if 'ts_code' in df.columns else 'unknown'
+        date = df['trade_date'].iloc[idx] if 'trade_date' in df.columns else 'unknown'
+        
+        logger.info(f"激进策略卖出信号 [{ts_code}] [{date}]: 信号={sell_signal}, "
+                   f"价格跌破EMA20={exit_condition}")
         
         return sell_signal
     

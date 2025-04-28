@@ -85,7 +85,7 @@ class BacktestEngine:
     
     def run_backtest(self, start_date: str = None, end_date: str = None,
                     stock_list: List[str] = None, verbose: bool = True,
-                    apply_fundamental_filter: bool = True) -> Dict:
+                    apply_fundamental_filter: bool = True, strategy_id: str = None) -> Dict:
         """
         运行回测
         
@@ -95,10 +95,20 @@ class BacktestEngine:
             stock_list: 股票列表，默认使用所有A股
             verbose: 是否显示进度条
             apply_fundamental_filter: 是否应用基本面筛选，默认为True
+            strategy_id: 策略ID，默认使用配置中的active_strategy
             
         Returns:
             回测结果字典
         """
+        # 确定使用的策略
+        if strategy_id is None:
+            strategy_id = self.config.get('active_strategy', 'default')
+        
+        # 记录使用的策略
+        logger.info(f"使用策略: {strategy_id}")
+        
+        # 确保配置中的active_strategy与当前使用的策略一致
+        self.config['active_strategy'] = strategy_id
         # 设置日期范围
         self.start_date = start_date or self.config['data']['start_date']
         self.end_date = end_date or self.config['data']['end_date']
@@ -111,6 +121,8 @@ class BacktestEngine:
         self.trade_history = []
         self.daily_positions = {}
         
+        # 交易日历已在前面获取
+        
         # 获取股票列表
         if stock_list is None:
             logger.info("获取A股股票列表...")
@@ -120,14 +132,22 @@ class BacktestEngine:
             if apply_fundamental_filter:
                 if self.config.get('fundamental'):
                     logger.info("应用基本面筛选条件...")
-                    # 传递回测结束日期，确保使用回测期间的基本面数据
-                    stock_list = self.data_fetcher.filter_stocks_by_fundamental(stock_list, date=self.end_date)
+                    
+                    # 确保使用交易日进行基本面筛选
+                    filter_date = self.start_date
+                    
+                    # 检查开始日期是否为交易日
+                    if not self.data_fetcher._is_trade_date(filter_date):
+                        # 找到最近的交易日
+                        nearest_trade_date = self.data_fetcher._get_nearest_trade_date(filter_date)
+                        logger.info(f"开始日期 {filter_date} 不是交易日，使用最近的交易日 {nearest_trade_date} 进行基本面筛选")
+                        filter_date = nearest_trade_date
+                    
+                    # 传递最近的交易日，确保使用回测期间的基本面数据
+                    stock_list = self.data_fetcher.filter_stocks_by_fundamental(stock_list, date=filter_date)
                     logger.info(f"基本面筛选后剩余股票数量: {len(stock_list)}")
                 else:
                     logger.warning("未找到基本面筛选参数配置，将使用所有股票")
-        
-        # 获取交易日历
-        logger.info("获取交易日历...")
         trade_dates = self.data_fetcher.get_trade_dates(self.start_date, self.end_date)
         
         if not trade_dates:
@@ -167,6 +187,35 @@ class BacktestEngine:
         initial_capital = self.config['capital']['initial']
         logger.info(f"初始资金: {initial_capital:,.2f}元")
         
+        # 根据策略ID记录策略特定参数
+        strategy_id = self.config['active_strategy']
+        if strategy_id == 'default':
+            logger.info("使用默认Supertrend多重指标策略")
+            logger.info(f"Supertrend参数: ST1(factor={self.config['supertrend']['st1']['factor']}, period={self.config['supertrend']['st1']['period']}), "
+                      f"ST2(factor={self.config['supertrend']['st2']['factor']}, period={self.config['supertrend']['st2']['period']}), "
+                      f"ST3(factor={self.config['supertrend']['st3']['factor']}, period={self.config['supertrend']['st3']['period']})")
+            logger.info(f"EMA参数: 周期={self.config['ema']['length']}")
+            logger.info(f"止盈止损: 止盈={self.config['exit']['take_profit']}%, 止损={self.config['exit']['stop_loss']}%")
+        elif strategy_id == 'conservative':
+            logger.info("使用保守型Supertrend策略")
+            logger.info(f"Supertrend参数: ST1(factor={self.config['supertrend']['st1']['factor']}, period={self.config['supertrend']['st1']['period']}), "
+                      f"ST2(factor={self.config['supertrend']['st2']['factor']}, period={self.config['supertrend']['st2']['period']}), "
+                      f"ST3(factor={self.config['supertrend']['st3']['factor']}, period={self.config['supertrend']['st3']['period']})")
+            logger.info(f"EMA参数: 周期={self.config['ema']['length']}")
+            logger.info(f"止盈止损: 止盈={self.config['exit']['take_profit']}%, 止损={self.config['exit']['stop_loss']}%")
+        elif strategy_id == 'aggressive':
+            logger.info("使用激进型涨停智能策略")
+            logger.info(f"涨停参数: 回溯天数={self.config.get('limit_up', {}).get('lookback_days', 11)}, "
+                      f"排除连续天数={self.config.get('limit_up', {}).get('exclude_consecutive', 3)}")
+            logger.info(f"月线MACD参数: 快线={self.config.get('monthly_macd', {}).get('fast_period', 6)}, "
+                      f"慢线={self.config.get('monthly_macd', {}).get('slow_period', 13)}, "
+                      f"信号线={self.config.get('monthly_macd', {}).get('signal_period', 5)}")
+            logger.info(f"EMA参数: 周期={self.config['ema']['length']}, 价格范围={self.config.get('ema', {}).get('price_range', 0.05)*100}%")
+            logger.info(f"部分止盈: 第一止盈点={self.config.get('exit', {}).get('partial_take_profit1', 30)}%, "
+                      f"第二止盈点={self.config.get('exit', {}).get('partial_take_profit2', 50)}%")
+        else:
+            logger.warning(f"未知策略ID: {strategy_id}，使用默认参数")
+        
         # 记录每日表现
         daily_performance = []
         
@@ -205,8 +254,8 @@ class BacktestEngine:
             except Exception as e:
                 logger.warning(f"检查交易日失败: {e}，假设 {date} 是交易日并继续")
             
-            # 生成当日信号 - 传递当前持仓信息
-            signals = self.signal_generator.generate_signals(all_stock_data, date, self.risk_manager.positions)
+            # 生成当日信号 - 传递当前持仓信息和策略ID
+            signals = self.signal_generator.generate_signals(all_stock_data, date, self.risk_manager.positions, strategy_id)
             
             # 更新投资组合
             opened, closed = self.risk_manager.update_portfolio(date, all_stock_data, signals)
@@ -284,6 +333,38 @@ class BacktestEngine:
         
         # 获取交易摘要
         trade_summary = self.risk_manager.get_trade_summary()
+        
+        # 添加策略特定的绩效指标
+        strategy_id = self.config['active_strategy']
+        if strategy_id == 'aggressive':
+            # 为激进策略添加特定指标
+            if not self.trade_history:
+                performance_metrics['partial_profit_trades'] = 0
+                performance_metrics['partial_profit_ratio'] = 0
+            else:
+                # 计算部分止盈交易数量
+                partial_profit_trades = sum(1 for t in self.trade_history
+                                          if t.get('type') == 'sell' and
+                                          (t.get('reason') == 'partial_take_profit_30' or
+                                           t.get('reason') == 'partial_take_profit_50'))
+                
+                # 计算部分止盈交易占比
+                total_sell_trades = sum(1 for t in self.trade_history if t.get('type') == 'sell')
+                partial_profit_ratio = partial_profit_trades / total_sell_trades * 100 if total_sell_trades > 0 else 0
+                
+                performance_metrics['partial_profit_trades'] = partial_profit_trades
+                performance_metrics['partial_profit_ratio'] = partial_profit_ratio
+                
+                # 计算涨停股票交易数量
+                limit_up_trades = sum(1 for t in self.trade_history
+                                    if t.get('type') == 'buy' and
+                                    t.get('limit_up_valid', False))
+                
+                performance_metrics['limit_up_trades'] = limit_up_trades
+                
+                logger.info(f"激进策略特定指标: 部分止盈交易数量={partial_profit_trades}, "
+                          f"部分止盈交易占比={partial_profit_ratio:.2f}%, "
+                          f"涨停股票交易数量={limit_up_trades}")
         
         # 整合回测结果
         backtest_results = {
@@ -491,7 +572,7 @@ class BacktestEngine:
             信号DataFrame
         """
         # 生成信号
-        signals = self.signal_generator.generate_signals(stock_data, date)
+        signals = self.signal_generator.generate_signals(stock_data, date, strategy_id=strategy_id)
         
         # 转换为DataFrame
         signals_list = []
