@@ -107,31 +107,33 @@ class SignalGenerator:
                 continue
 
             # 获取指定日期的数据
-            date_idx = df[df['trade_date'] == date].index[0]
+            date_row = df[df['trade_date'] == date]
+            date_idx = date_row.index[0]
+            date_position = df.index.get_loc(date_idx)
             
             # 确保有足够的历史数据
-            if date_idx < 3:  # 至少需要20天数据
+            if date_position < 3:  # 至少需要3天数据
                 continue
             
             valid_stocks += 1
             
             # 获取当天数据
-            current_data = df.iloc[date_idx]
+            current_data = df.iloc[date_position]
             
             # 生成买入信号
-            buy_signal = self._generate_buy_signal(df, date_idx, strategy_id)
+            buy_signal = self._generate_buy_signal(df, date_position, strategy_id)
             if buy_signal == 1:
                 stocks_with_buy_signal += 1
             
             # 生成卖出信号 - 只有当股票在当前持仓中时才考虑卖出信号
             sell_signal = 0
             if ts_code in current_positions:
-                sell_signal = self._generate_sell_signal(df, date_idx, strategy_id)
+                sell_signal = self._generate_sell_signal(df, date_position, strategy_id)
                 if sell_signal == 1:
                     stocks_with_sell_signal += 1
             
             # 计算股票评分
-            score = self._calculate_stock_score(df, date_idx)
+            score = self._calculate_stock_score(df, date_position)
             
             # 获取基本面数据用于计算ROE/PB
             roe_pb_score = 0
@@ -156,9 +158,9 @@ class SignalGenerator:
                 logger.warning(f"获取股票{ts_code}基本面数据失败: {e}")
             
             # 计算EMA(20)乖离率
-            if 'close' in current_data and date_idx >= 20:
+            if 'close' in current_data and date_position >= 20:
                 # 计算EMA(20)
-                ema20 = df['close'].iloc[date_idx-20:date_idx+1].ewm(span=20, adjust=False).mean().iloc[-1]
+                ema20 = df['close'].iloc[date_position-20:date_position+1].ewm(span=20, adjust=False).mean().iloc[-1]
                 # 计算乖离率
                 deviation = abs(current_data['close'] / ema20 - 1) * 100
                 # 乖离率越小，分数越高 (最高10分)
