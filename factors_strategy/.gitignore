@@ -1,0 +1,103 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+*.egg-info/
+dist/
+build/
+
+# Jupyter Notebooks
+.ipynb_checkpoints
+*.ipynb
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Data
+data/raw/
+data/processed/
+*.csv
+*.parquet
+*.h5
+*.pkl
+*.pickle
+
+# Models
+models/saved/
+models/checkpoints/
+*.pth
+*.h5
+*.onnx
+*.pb
+
+# Logs
+logs/
+*.log
+
+# Output
+output/
+reports/
+*.html
+*.pdf
+
+# Backups
+backups/
+*.tar.gz
+*.zip
+
+# Configuration
+config/*.yaml
+!config/*.yaml.example
+.env
+*.env
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+*.temp
+*.bak
+
+# Credentials
+credentials/
+secrets/
+*.pem
+*.key
+*.crt
+
+# Cache
+.cache/
+*.cache
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+.tox/
+
+# Documentation build
+docs/_build/
+docs/_static/
+docs/_templates/
