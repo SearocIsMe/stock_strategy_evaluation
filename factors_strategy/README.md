@@ -111,13 +111,17 @@ python --version  # Should show Python 3.12.x or higher
 ### Installation
 
 ```bash
+
 # Clone the repository
 git clone <repository-url>
 cd factors_strategy
 
 # Create virtual environment
-python -m venv venv
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+python -m venv factor-quant
+source factor-quant/bin/activate  # On Windows: venv\Scripts\activate
+
+sudo apt-get update && sudo apt-get install build-essential
+pip install catboost ta-lib tulipy zipline-reloaded chromadb shap scalene
 
 # Install dependencies
 pip install -r requirements.txt

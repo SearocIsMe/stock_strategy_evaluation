@@ -1,0 +1,75 @@
+# Database Configuration
+# Supports ClickHouse and DolphinDB
+
+database:
+  type: "clickhouse"  # Options: clickhouse, dolphindb
+  
+  clickhouse:
+    host: "localhost"
+    port: 9000
+    http_port: 8123
+    user: "default"
+    password: ""
+    database: "stock_strategy"
+    
+    # Connection pool settings
+    pool:
+      min_size: 5
+      max_size: 20
+      timeout: 30
+      
+    # Data retention settings
+    retention:
+      tick_data_years: 5  # Keep 5 years of tick data
+      factor_data_years: 10  # Keep 10 years of factor data
+      
+  dolphindb:
+    host: "localhost"
+    port: 8848
+    user: "admin"
+    password: "123456"
+    
+    # DFS settings
+    dfs:
+      db_path: "dfs://stock_strategy"
+      partition_type: "VALUE"
+      partition_scheme: "date"
+      
+# Table schemas
+schemas:
+  tick_data:
+    table_name: "tick_data"
+    engine: "MergeTree"
+    partition_by: "toYYYYMM(timestamp)"
+    order_by: "(symbol, timestamp)"
+    ttl: "timestamp + INTERVAL 5 YEAR"
+    
+  order_book:
+    table_name: "order_book"
+    engine: "MergeTree"
+    partition_by: "toYYYYMM(timestamp)"
+    order_by: "(symbol, timestamp)"
+    
+  factors:
+    table_name: "factors"
+    engine: "MergeTree"
+    partition_by: "toYYYYMM(date)"
+    order_by: "(symbol, date, factor_name)"
+    
+  predictions:
+    table_name: "predictions"
+    engine: "MergeTree"
+    partition_by: "toYYYYMM(prediction_date)"
+    order_by: "(prediction_date, symbol)"
+
+# Data ingestion settings
+ingestion:
+  batch_size: 100000
+  parallel_workers: 8
+  compression: "lz4"
+  
+# Query optimization
+optimization:
+  enable_query_cache: true
+  max_memory_usage: "10G"
+  max_threads: 16

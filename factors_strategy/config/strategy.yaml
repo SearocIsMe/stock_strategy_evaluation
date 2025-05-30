@@ -1,0 +1,179 @@
+# Strategy Configuration
+# Multi-Factor AI Stock Selection Strategy
+
+strategy:
+  name: "AI_MultiFactorStrategy_10PCT"
+  description: "AI-enhanced multi-factor strategy targeting 10% gains in 1-3 days"
+  version: "1.0.0"
+  
+  # Trading Parameters
+  trading:
+    market_open: "09:30:00"
+    market_close: "15:00:00"
+    pre_market_analysis: "08:30:00"
+    post_market_analysis: "15:30:00"
+    
+    # Position Management
+    position_sizing:
+      method: "risk_parity"  # Options: equal_weight, risk_parity, kelly_criterion
+      max_position_size: 0.2  # 20% max per stock
+      min_position_size: 0.05  # 5% min per stock
+      
+    # Portfolio Constraints
+    portfolio:
+      max_stocks: 10
+      min_stocks: 5
+      max_sector_weight: 0.3  # 30% max in one sector
+      max_correlation: 0.7  # Max pairwise correlation
+      
+  # Risk Management
+  risk_management:
+    stop_loss:
+      enabled: true
+      percentage: 0.05  # 5% stop loss
+      trailing: true
+      trailing_distance: 0.03
+      
+    position_limits:
+      max_portfolio_leverage: 1.0  # No leverage
+      max_daily_turnover: 0.5  # 50% daily turnover limit
+      min_holding_period: 1  # days
+      
+    volatility_scaling:
+      enabled: true
+      target_volatility: 0.15  # 15% annualized
+      lookback_days: 60
+      
+  # Signal Generation
+  signals:
+    # Factor Combination
+    factor_weights:
+      method: "dynamic"  # Options: static, dynamic, ml_optimized
+      rebalance_frequency: "daily"
+      min_factor_weight: 0.0
+      max_factor_weight: 0.3
+      
+    # Prediction Thresholds
+    thresholds:
+      min_probability: 0.6  # Minimum 60% probability for 10% gain
+      min_expected_return: 0.08  # Minimum 8% expected return
+      min_sharpe_ratio: 1.5
+      
+    # Signal Filtering
+    filters:
+      - name: "liquidity_filter"
+        min_daily_volume: 50000000  # 50M CNY
+        min_market_cap: 5000000000  # 5B CNY
+        
+      - name: "volatility_filter"
+        max_daily_volatility: 0.05  # 5% daily vol
+        min_daily_volatility: 0.005  # 0.5% daily vol
+        
+      - name: "momentum_filter"
+        exclude_recent_gainers: true
+        recent_gain_threshold: 0.2  # 20% in last 5 days
+        lookback_days: 5
+        
+  # Execution
+  execution:
+    order_types:
+      entry: "limit"  # Options: market, limit, vwap
+      exit: "market"
+      
+    timing:
+      entry_time: "09:35:00"  # Enter positions after 5 min
+      exit_time: "14:55:00"  # Exit before close
+      
+    slippage_model:
+      method: "linear"  # Options: linear, square_root, constant
+      base_slippage: 0.0005  # 5 bps
+      impact_coefficient: 0.1
+      
+  # Backtesting
+  backtesting:
+    start_date: "2020-01-01"
+    end_date: "2024-12-31"
+    initial_capital: 10000000  # 10M CNY
+    
+    # Walk-Forward Analysis
+    walk_forward:
+      enabled: true
+      training_window: 252  # 1 year
+      testing_window: 63  # 3 months
+      step_size: 21  # 1 month
+      
+    # Transaction Costs
+    costs:
+      commission_rate: 0.0003  # 3 bps
+      stamp_duty: 0.001  # 0.1% (sell only)
+      min_commission: 5  # 5 CNY
+      
+    # Performance Metrics
+    metrics:
+      - "total_return"
+      - "annualized_return"
+      - "sharpe_ratio"
+      - "max_drawdown"
+      - "win_rate"
+      - "profit_factor"
+      - "information_ratio"
+      - "calmar_ratio"
+      
+  # LLM Integration
+  llm_config:
+    model: "qwen-72b"  # Options: qwen-72b, gpt-4, claude-3
+    temperature: 0.3
+    max_tokens: 2000
+    
+    # Factor Generation Prompts
+    prompts:
+      daily_analysis: |
+        Analyze today's market conditions:
+        - Market sentiment: {sentiment_score}
+        - Sector rotation: {sector_performance}
+        - Macro indicators: {macro_data}
+        
+        Suggest factor weight adjustments for maximum alpha generation.
+        
+      factor_discovery: |
+        Based on recent market anomalies:
+        {anomaly_description}
+        
+        Design a new factor that could capture this inefficiency.
+        Provide mathematical formula and implementation details.
+        
+  # Monitoring & Alerts
+  monitoring:
+    metrics_update_frequency: "1min"
+    
+    alerts:
+      - type: "drawdown"
+        threshold: 0.1  # 10% drawdown
+        action: "reduce_positions"
+        
+      - type: "correlation_spike"
+        threshold: 0.9  # 90% correlation
+        action: "rebalance"
+        
+      - type: "factor_decay"
+        threshold: 0.5  # 50% IC decay
+        action: "retrain_models"
+        
+    reporting:
+      daily_report_time: "16:00:00"
+      report_recipients: ["strategy@example.com"]
+      include_charts: true
+      
+# Output Configuration
+output:
+  recommendations:
+    format: "json"  # Options: json, csv, parquet
+    include_confidence: true
+    include_factors: true
+    save_path: "./output/recommendations"
+    
+  logs:
+    level: "INFO"  # Options: DEBUG, INFO, WARNING, ERROR
+    save_path: "./logs"
+    rotation: "daily"
+    retention_days: 30

@@ -1,0 +1,133 @@
+# Model Configuration
+# Deep Learning and Ensemble Models
+
+models:
+  # Deep Learning Models
+  cnn:
+    enabled: true
+    architecture:
+      input_channels: 64  # Number of features
+      conv_layers:
+        - filters: 128
+          kernel_size: 3
+          stride: 1
+          padding: 1
+        - filters: 256
+          kernel_size: 3
+          stride: 1
+          padding: 1
+        - filters: 512
+          kernel_size: 3
+          stride: 1
+          padding: 1
+      dropout_rate: 0.3
+      output_dim: 128  # Feature embedding dimension
+    
+    training:
+      batch_size: 512
+      learning_rate: 0.001
+      epochs: 100
+      early_stopping_patience: 10
+      optimizer: "adam"
+      loss_function: "binary_crossentropy"
+      
+  lstm:
+    enabled: true
+    architecture:
+      input_dim: 64
+      hidden_dim: 256
+      num_layers: 3
+      dropout: 0.3
+      bidirectional: true
+      
+    training:
+      sequence_length: 100  # Ticks
+      batch_size: 256
+      learning_rate: 0.001
+      epochs: 50
+      
+  transformer:
+    enabled: true
+    architecture:
+      d_model: 512
+      nhead: 8
+      num_encoder_layers: 6
+      dim_feedforward: 2048
+      dropout: 0.1
+      max_seq_length: 1000
+      
+    training:
+      batch_size: 128
+      learning_rate: 0.0001
+      warmup_steps: 4000
+      
+  # Ensemble Models
+  xgboost:
+    enabled: true
+    parameters:
+      n_estimators: 1000
+      max_depth: 8
+      learning_rate: 0.01
+      subsample: 0.8
+      colsample_bytree: 0.8
+      objective: "binary:logistic"
+      eval_metric: "auc"
+      early_stopping_rounds: 50
+      
+  lightgbm:
+    enabled: true
+    parameters:
+      num_leaves: 31
+      max_depth: -1
+      learning_rate: 0.01
+      n_estimators: 1000
+      subsample: 0.8
+      colsample_bytree: 0.8
+      objective: "binary"
+      metric: "auc"
+      early_stopping_rounds: 50
+      
+  # Model Ensemble
+  ensemble:
+    method: "weighted_average"  # Options: weighted_average, stacking, voting
+    weights:
+      cnn: 0.25
+      lstm: 0.20
+      transformer: 0.25
+      xgboost: 0.15
+      lightgbm: 0.15
+      
+# GPU Configuration
+gpu:
+  device: "cuda"  # Options: cuda, cpu
+  multi_gpu: true
+  gpu_ids: [0, 1, 2, 3]  # For H100 multi-GPU setup
+  mixed_precision: true
+  
+# Training Configuration
+training:
+  train_test_split: 0.8
+  validation_split: 0.1
+  random_seed: 42
+  num_workers: 16
+  pin_memory: true
+  
+  # Data augmentation
+  augmentation:
+    noise_injection: 0.01
+    time_shift: true
+    feature_dropout: 0.1
+    
+# Prediction Configuration
+prediction:
+  target: "return_3d_10pct"  # 3-day 10% return
+  threshold: 0.5
+  top_n_stocks: 10
+  confidence_threshold: 0.7
+  
+# Model Persistence
+persistence:
+  model_dir: "./models/saved"
+  checkpoint_dir: "./models/checkpoints"
+  save_best_only: true
+  save_frequency: 5  # epochs

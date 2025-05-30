@@ -1,0 +1,164 @@
+# Factor Configuration
+# Traditional and AI-Generated Factors
+
+factors:
+  # High-Frequency Tick Factors
+  microstructure:
+    - name: "order_flow_imbalance"
+      description: "Buy-sell order imbalance"
+      window_sizes: [10, 30, 60, 300]  # seconds
+      formula: "(bid_volume - ask_volume) / (bid_volume + ask_volume)"
+      
+    - name: "bid_ask_spread"
+      description: "Relative bid-ask spread"
+      window_sizes: [10, 30, 60]
+      formula: "(ask_price - bid_price) / mid_price"
+      
+    - name: "order_book_depth_ratio"
+      description: "Ratio of bid to ask depth"
+      levels: [1, 5, 10]
+      formula: "sum(bid_volumes[:level]) / sum(ask_volumes[:level])"
+      
+    - name: "price_impact"
+      description: "Kyle's lambda - price impact of trades"
+      window_sizes: [60, 300, 600]
+      formula: "abs(price_change) / volume"
+      
+  liquidity:
+    - name: "amihud_illiquidity"
+      description: "Amihud illiquidity measure"
+      window_sizes: [300, 600, 1800]
+      formula: "abs(return) / volume"
+      
+    - name: "volume_clock"
+      description: "Volume-synchronized sampling"
+      volume_buckets: [100000, 500000, 1000000]
+      
+    - name: "trade_size_distribution"
+      description: "Distribution of trade sizes"
+      percentiles: [25, 50, 75, 90]
+      
+  volatility:
+    - name: "realized_volatility"
+      description: "High-frequency realized volatility"
+      window_sizes: [60, 300, 600]
+      sampling_freq: 1  # seconds
+      
+    - name: "jump_detection"
+      description: "Lee-Mykland jump detection"
+      threshold: 3.0
+      window_size: 300
+      
+    - name: "volatility_of_volatility"
+      description: "Vol of vol measure"
+      window_sizes: [300, 600]
+      
+  momentum:
+    - name: "tick_momentum"
+      description: "Short-term price momentum"
+      lookback_periods: [10, 30, 60, 300]
+      
+    - name: "volume_momentum"
+      description: "Volume acceleration"
+      lookback_periods: [60, 300, 600]
+      
+    - name: "trade_intensity"
+      description: "Number of trades per time unit"
+      window_sizes: [60, 300]
+      
+  # AI-Generated Factor Templates
+  ai_factors:
+    llm_prompts:
+      - name: "factor_discovery"
+        prompt: |
+          Based on the following tick data patterns:
+          - Price: {price_pattern}
+          - Volume: {volume_pattern}
+          - Order Book: {orderbook_pattern}
+          
+          Generate a new factor that captures:
+          1. The relationship between these patterns
+          2. Predictive power for 3-day 10% returns
+          3. Low correlation with existing factors
+          
+          Provide:
+          - Factor name
+          - Mathematical formula
+          - Economic intuition
+          
+      - name: "factor_combination"
+        prompt: |
+          Given these existing factors with their IC values:
+          {factor_list}
+          
+          Create a non-linear combination that:
+          1. Maximizes predictive power
+          2. Maintains interpretability
+          3. Reduces overfitting risk
+          
+    cnn_features:
+      - name: "orderbook_image"
+        description: "CNN features from order book snapshots"
+        image_size: [100, 50]  # levels x time
+        channels: ["bid_price", "bid_volume", "ask_price", "ask_volume"]
+        
+      - name: "price_volume_heatmap"
+        description: "2D representation of price-volume dynamics"
+        resolution: [64, 64]
+        time_window: 300
+        
+# Factor Evaluation Metrics
+evaluation:
+  metrics:
+    - name: "information_coefficient"
+      description: "Rank correlation with returns"
+      min_threshold: 0.02
+      
+    - name: "factor_stability"
+      description: "Rolling IC stability"
+      window: 60  # days
+      min_stability: 0.7
+      
+    - name: "factor_decay"
+      description: "IC decay over prediction horizon"
+      horizons: [1, 3, 5, 10]  # days
+      
+    - name: "factor_turnover"
+      description: "Portfolio turnover from factor"
+      max_turnover: 0.5  # daily
+      
+    - name: "factor_capacity"
+      description: "Market capacity of factor"
+      min_capacity: 1000000  # CNY
+      
+# Factor Combination
+combination:
+  methods:
+    - name: "equal_weight"
+      description: "Simple equal weighting"
+      
+    - name: "ic_weight"
+      description: "Weight by trailing IC"
+      lookback: 60
+      
+    - name: "machine_learning"
+      description: "ML-based combination"
+      model: "lightgbm"
+      
+    - name: "risk_parity"
+      description: "Risk parity weighting"
+      target_risk: 0.01
+      
+# Factor Storage
+storage:
+  update_frequency: "1min"  # Factor calculation frequency
+  history_days: 3650  # 10 years
+  compression: "zstd"
+  
+# Factor Universe
+universe:
+  exchanges: ["SSE", "SZSE"]  # Shanghai and Shenzhen
+  exclude_st: true  # Exclude ST stocks
+  min_market_cap: 1000000000  # 1B CNY
+  min_daily_volume: 10000000  # 10M CNY
+  min_price: 2.0  # CNY

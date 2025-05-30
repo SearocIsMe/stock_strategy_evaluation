@@ -9,23 +9,23 @@ scikit-learn==1.4.0
 clickhouse-driver==0.2.7
 clickhouse-connect==0.7.0
 # Note: DolphinDB Python API version may vary
-dolphindb==1.30.22.4
+dolphindb==3.0.2.2
 
-# Deep Learning - PyTorch 2.6+
-torch==2.6.0
+# Deep Learning - PyTorch 2.5+ (2.6 has compatibility issues with torchvision)
+torch==2.5.0
 torchvision==0.20.0
-torchaudio==2.6.0
+torchaudio==2.5.0
 # For CUDA 12.1 support, install with:
-# pip install torch==2.6.0 torchvision==0.20.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu121
+# pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
 
 # TensorFlow (optional, for comparison)
-tensorflow==2.15.0
-keras==3.0.2
+tensorflow==2.19.0
+keras==3.5.0  # Updated for TensorFlow 2.19.0 compatibility
 
 # Machine Learning
 xgboost==2.0.3
 lightgbm==4.3.0
-catboost==1.2.2
+# catboost==1.2.2  # EXCLUDED: PyYAML build conflict with Python 3.12
 
 # Time Series
 statsmodels==0.14.1
@@ -55,7 +55,7 @@ pydantic==2.5.3
 pydantic-settings==2.1.0
 
 # Configuration
-pyyaml==6.0.1
+pyyaml==6.0.1  # Fixed version for Python 3.12 compatibility
 python-dotenv==1.0.1
 omegaconf==2.3.0  # Advanced configuration management
 
@@ -86,19 +86,19 @@ openai==1.10.0
 transformers==4.37.2
 langchain==0.1.4
 langchain-community==0.0.16
-chromadb==0.4.22
+# chromadb==0.4.22  # EXCLUDED: Requires C++11 compiler
 tiktoken==0.5.2  # Token counting for LLMs
 
 # Backtesting
 vectorbt==0.26.2  # Modern backtesting framework
 backtrader==1.9.78.123
-zipline-reloaded==3.0.3
+# zipline-reloaded==3.0.3  # EXCLUDED: Requires compilation
 pyfolio-reloaded==0.9.5
 
 # Technical Analysis
-ta-lib==0.4.28  # Requires separate TA-Lib C library installation
+# ta-lib==0.4.28  # EXCLUDED: Requires TA-Lib C library and gcc
 pandas-ta==0.3.14b0
-tulipy==0.4.0  # Pure Python technical indicators
+# tulipy==0.4.0  # EXCLUDED: Requires gcc compiler
 
 # Utilities
 tqdm==4.66.1
@@ -135,19 +135,19 @@ category-encoders==2.6.3
 optuna==3.5.0
 hyperopt==0.2.7
 scikit-optimize==0.9.0
-ray[tune]==2.9.1  # Distributed hyperparameter tuning
+ray[tune]==2.31.0  # Distributed hyperparameter tuning - updated to available version
 
 # Additional ML Tools
 imbalanced-learn==0.11.0
 mlflow==2.10.0  # ML experiment tracking
 wandb==0.16.2  # Weights & Biases tracking
-shap==0.44.1  # Model explainability
+# shap==0.44.1  # EXCLUDED: Requires g++ compiler
 
 # Profiling & Performance
 py-spy==0.3.14  # Sampling profiler
 memory-profiler==0.61.0
 line-profiler==4.1.2
-scalene==1.5.38  # High-performance profiler
+# scalene==1.5.38  # EXCLUDED: Requires 'make' command
 
 # Color output for terminal
 colorama==0.4.6
@@ -156,4 +156,29 @@ termcolor==2.4.0
 # Additional dependencies for production
 gunicorn==21.2.0  # WSGI server
 supervisor==4.2.5  # Process manager
+# ===== IMPORTANT: COMPILATION REQUIREMENTS =====
+# Some packages were excluded because they require C/C++ compilers:
+#
+# To install build tools on Ubuntu/Debian:
+# sudo apt-get update && sudo apt-get install build-essential
+#
+# To install build tools on CentOS/RHEL/Fedora:
+# sudo yum groupinstall "Development Tools"
+#
+# After installing build tools, you can install the excluded packages:
+# - catboost==1.2.2
+# - ta-lib==0.4.28 (also requires TA-Lib C library)
+# - tulipy==0.4.0
+# - zipline-reloaded==3.0.3
+# - chromadb==0.4.22
+# - shap==0.44.1
+# - scalene==1.5.38
+#
+# For TA-Lib specifically:
+# wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
+# tar -xzf ta-lib-0.4.0-src.tar.gz
+# cd ta-lib/
+# ./configure --prefix=/usr
+# make
+# sudo make install
 python-json-logger==2.0.7  # JSON logging
