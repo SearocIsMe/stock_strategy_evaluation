@@ -29,6 +29,7 @@ env/
 ENV/
 results/
 .venv/
+factor-quant/
 
 # IDE
 .idea/
