@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+bin/
 *.py[cod]
 *$py.class
 *.so
@@ -14,7 +15,7 @@ lib/
 lib64/
 parts/
 sdist/
-
+factor-quant/
 var/
 wheels/
 *.egg-info/

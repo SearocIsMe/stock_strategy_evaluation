@@ -13,10 +13,18 @@ NC='\033[0m' # No Color
 
 # Configuration
 PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-PYTHON_VERSION="3.12"
+PYTHON_MIN_VERSION="3.10"  # Minimum Python version required
 VENV_NAME="venv"
 CLICKHOUSE_VERSION="23.8"
 DOCKER_COMPOSE_FILE="$PROJECT_DIR/infrastructure/deploy/docker-compose.yml"
+
+# Preserve user's Python path when using sudo
+if [ -n "$SUDO_USER" ]; then
+    USER_PYTHON=$(sudo -u "$SUDO_USER" which python3 2>/dev/null)
+    if [ -n "$USER_PYTHON" ]; then
+        export PATH="$(dirname "$USER_PYTHON"):$PATH"
+    fi
+fi
 
 echo -e "${GREEN}========================================${NC}"
 echo -e "${GREEN}Multi-Factor AI Stock Selection Strategy${NC}"
@@ -45,18 +53,17 @@ print_success() {
 check_python_version() {
     if command_exists python3; then
         PYTHON_VERSION_INSTALLED=$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')
-        REQUIRED_VERSION="3.12"
         
-        if [ "$(printf '%s\n' "$REQUIRED_VERSION" "$PYTHON_VERSION_INSTALLED" | sort -V | head -n1)" = "$REQUIRED_VERSION" ]; then
-            print_success "Python $PYTHON_VERSION_INSTALLED is installed (>= $REQUIRED_VERSION required)"
+        if [ "$(printf '%s\n' "$PYTHON_MIN_VERSION" "$PYTHON_VERSION_INSTALLED" | sort -V | head -n1)" = "$PYTHON_MIN_VERSION" ]; then
+            print_success "Python $PYTHON_VERSION_INSTALLED is installed (>= $PYTHON_MIN_VERSION required)"
             return 0
         else
-            print_error "Python $PYTHON_VERSION_INSTALLED is installed, but Python $REQUIRED_VERSION or higher is required"
-            print_status "Please install Python 3.12+ from https://www.python.org/downloads/"
+            print_error "Python $PYTHON_VERSION_INSTALLED is installed, but Python $PYTHON_MIN_VERSION or higher is required"
+            print_status "Please install Python $PYTHON_MIN_VERSION+ from https://www.python.org/downloads/"
             return 1
         fi
     else
-        print_error "Python 3 is not installed. Please install Python $REQUIRED_VERSION or higher."
+        print_error "Python 3 is not installed. Please install Python $PYTHON_MIN_VERSION or higher."
         return 1
     fi
 }
@@ -71,6 +78,30 @@ fi
 if ! command_exists docker; then
     print_error "Docker is not installed. Please install Docker."
     exit 1
+fi
+
+# Check Docker permissions
+if ! docker ps >/dev/null 2>&1; then
+    if [ -n "$SUDO_USER" ]; then
+        print_status "Running with sudo. Checking Docker service..."
+        if ! systemctl is-active --quiet docker; then
+            print_status "Starting Docker service..."
+            systemctl start docker
+        fi
+        # Try again after starting docker
+        if ! docker ps >/dev/null 2>&1; then
+            print_error "Cannot connect to Docker daemon even with sudo."
+            exit 1
+        fi
+    else
+        print_error "Cannot connect to Docker daemon. Permission denied."
+        print_status "Please ensure Docker is running and you have proper permissions."
+        print_status "Try one of the following:"
+        print_status "  1. Add your user to the docker group: sudo usermod -aG docker $USER"
+        print_status "  2. Log out and log back in for group changes to take effect"
+        print_status "  3. Or run this script with sudo (not recommended for security reasons)"
+        exit 1
+    fi
 fi
 
 if ! command_exists docker-compose && ! docker compose version >/dev/null 2>&1; then
@@ -113,6 +144,10 @@ else
 fi
 
 # Activate virtual environment
+if [ -n "$SUDO_USER" ]; then
+    # When running with sudo, we need to ensure proper permissions
+    chown -R "$SUDO_USER:$SUDO_USER" "$VENV_NAME"
+fi
 source "$VENV_NAME/bin/activate"
 
 # Upgrade pip
@@ -126,18 +161,18 @@ pip install -r requirements.txt
 # Install additional GPU support if NVIDIA GPU is available
 if command_exists nvidia-smi; then
     print_status "NVIDIA GPU detected. Installing CUDA dependencies..."
-    # PyTorch 2.6.0 with CUDA 12.1
-    pip install torch==2.6.0 torchvision==0.20.0 torchaudio==2.6.0 --index-url https://download.pytorch.org/whl/cu121
+    # PyTorch with CUDA 12.2 - using latest stable version
+    pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu122
+    print_success "Installed PyTorch with CUDA 12.2 support"
 else
     print_status "No NVIDIA GPU detected. Using CPU version of PyTorch."
+    pip install torch torchvision torchaudio
 fi
 
 # Create Docker Compose file for services
 print_status "Creating Docker Compose configuration..."
 
 cat > "$DOCKER_COMPOSE_FILE" << 'EOF'
-version: '3.8'
-
 services:
   clickhouse:
     image: clickhouse/clickhouse-server:23.8
@@ -375,7 +410,13 @@ print_status "Initializing database schema..."
 
 cd "$PROJECT_DIR"
 source "$VENV_NAME/bin/activate"
-python -m data.storage.initialize
+
+# Check if the initialize module exists before running it
+if [ -f "$PROJECT_DIR/data/storage/initialize.py" ]; then
+    python -m data.storage.initialize
+else
+    print_status "Database initialization script not found. Skipping..."
+fi
 
 # Create systemd service (if on Linux)
 if [[ "$OSTYPE" == "linux-gnu"* ]]; then
@@ -389,7 +430,7 @@ Requires=docker.service
 
 [Service]
 Type=simple
-User=$USER
+User=${SUDO_USER:-$USER}
 WorkingDirectory=$PROJECT_DIR
 Environment="PATH=$PROJECT_DIR/$VENV_NAME/bin:/usr/local/bin:/usr/bin:/bin"
 ExecStart=$PROJECT_DIR/$VENV_NAME/bin/python -m strategy.main_strategy

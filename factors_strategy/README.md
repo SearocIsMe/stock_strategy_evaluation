@@ -121,12 +121,13 @@ python -m venv factor-quant
 source factor-quant/bin/activate  # On Windows: venv\Scripts\activate
 
 sudo apt-get update && sudo apt-get install build-essential
-pip install catboost ta-lib tulipy zipline-reloaded chromadb shap scalene
+pip install catboost tulipy zipline-reloaded chromadb shap scalene
 
 # Install dependencies
 pip install -r requirements.txt
 
 # Setup infrastructure
+# install docker before run below script
 ./infrastructure/deploy/setup.sh
 ```
 
