@@ -30,7 +30,7 @@ class DataWriter:
                 INSERT INTO tick_data (
                     timestamp, symbol, price, volume, turnover,
                     bid_price, bid_volume, ask_price, ask_volume,
-                    trade_direction, trade_type, exchange
+                    trade_direction, trade_type, exchange, update_time
                 ) VALUES
                 """
                 self._batch_insert(query, data, batch_size)
@@ -60,7 +60,7 @@ class DataWriter:
                     ask_price_7, ask_volume_7, ask_price_8, ask_volume_8,
                     ask_price_9, ask_volume_9, ask_price_10, ask_volume_10,
                     total_bid_volume, total_ask_volume, bid_ask_imbalance,
-                    exchange
+                    exchange, update_time
                 ) VALUES
                 """
                 self._batch_insert(query, data, batch_size)

@@ -21,10 +21,11 @@ from data.storage.data_reader import DataReader
 from data.ingestion.data_collector import DataCollector
 from data.ingestion.data_preprocessor import DataPreprocessor
 
-# Setup logging
+# Setup enhanced logging with line numbers and thread ID
+import threading
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - [Thread-%(thread)d] [%(filename)s:%(lineno)d] - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
@@ -97,7 +98,7 @@ class DataIngestionPipeline:
             # Collect raw tick data
             raw_data = await self.collector.collect_tick_data(symbol, start_date, end_date)
             
-            if raw_data.empty:
+            if raw_data.empty: 
                 logger.warning(f"No tick data found for {symbol}")
                 return
                 

@@ -16,6 +16,11 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 from factors.traditional.microstructure_factors import MicrostructureFactors
 
+# Configure enhanced logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - [Thread-%(thread)d] [%(filename)s:%(lineno)d] - %(message)s'
+)
 logger = logging.getLogger(__name__)
 
 
@@ -196,8 +201,8 @@ class DataPreprocessor:
         if len(data) < initial_count:
             logger.info(f"Removed {initial_count - len(data)} duplicate order book records")
             
-        # Remove invalid prices and volumes
-        for level in range(1, 6):
+        # Remove invalid prices and volumes (10 levels to match schema)
+        for level in range(1, 11):
             bid_price_col = f'bid_price_{level}'
             ask_price_col = f'ask_price_{level}'
             bid_vol_col = f'bid_volume_{level}'
@@ -285,6 +290,10 @@ class DataPreprocessor:
             # Return factors
             daily_return = (close_price - open_price) / open_price
             
+            # Calculate returns if not present
+            if 'returns' not in day_data.columns:
+                day_data['returns'] = day_data['price'].pct_change()
+            
             # Volatility factors
             returns = day_data['returns'].dropna()
             if len(returns) > 1:
@@ -297,7 +306,8 @@ class DataPreprocessor:
             # VWAP factor
             vwap = (day_data['price'] * day_data['volume']).sum() / day_data['volume'].sum()
             
-            # Create factor records
+            # Create factor records with update_time
+            current_time = datetime.now()
             factor_records = [
                 {
                     'date': date,
@@ -310,7 +320,8 @@ class DataPreprocessor:
                     'calculation_time': 0.001,
                     'version': '1.0',
                     'is_valid': 1,
-                    'quality_score': 1.0
+                    'quality_score': 1.0,
+                    'update_time': current_time
                 },
                 {
                     'date': date,
@@ -323,7 +334,8 @@ class DataPreprocessor:
                     'calculation_time': 0.001,
                     'version': '1.0',
                     'is_valid': 1,
-                    'quality_score': 1.0
+                    'quality_score': 1.0,
+                    'update_time': current_time
                 },
                 {
                     'date': date,
@@ -336,7 +348,8 @@ class DataPreprocessor:
                     'calculation_time': 0.001,
                     'version': '1.0',
                     'is_valid': 1,
-                    'quality_score': 1.0
+                    'quality_score': 1.0,
+                    'update_time': current_time
                 },
                 {
                     'date': date,
@@ -349,7 +362,8 @@ class DataPreprocessor:
                     'calculation_time': 0.001,
                     'version': '1.0',
                     'is_valid': 1,
-                    'quality_score': 1.0
+                    'quality_score': 1.0,
+                    'update_time': current_time
                 }
             ]
             
