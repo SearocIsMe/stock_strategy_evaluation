@@ -206,7 +206,7 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:./data
+      - redis_data:/data
     command: redis-server --appendonly yes
     restart: unless-stopped
     healthcheck:
