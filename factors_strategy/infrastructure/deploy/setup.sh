@@ -12,7 +12,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Configuration
-PROJECT_DIR="$pwd"
+PROJECT_DIR="${PROJECT_DIR:-$(pwd)}"
 PYTHON_MIN_VERSION="3.10"  # Minimum Python version required
 VENV_NAME="factor-quant"
 CLICKHOUSE_VERSION="23.8"
@@ -127,6 +127,7 @@ directories=(
 )
 
 for dir in "${directories[@]}"; do
+    echo "to create folder: $PROJECT_DIR/$dir"
     mkdir -p "$PROJECT_DIR/$dir"
     print_status "Created directory: $dir"
 done
