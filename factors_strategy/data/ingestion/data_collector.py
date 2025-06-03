@@ -11,6 +11,9 @@ from typing import Dict, List, Optional, Any
 import asyncio
 import aiohttp
 import pytz
+import yfinance as yf
+import requests
+from abc import ABC, abstractmethod
 
 # Configure enhanced logging
 logging.basicConfig(
@@ -20,59 +23,214 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-class DataCollector:
-    """Collects market data from various sources"""
+class DataProvider(ABC):
+    """Abstract base class for data providers"""
+    
+    @abstractmethod
+    async def get_tick_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+        """Get tick data from provider"""
+        pass
+    
+    @abstractmethod
+    async def get_order_book_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+        """Get order book data from provider"""
+        pass
+    
+    @abstractmethod
+    async def get_real_time_data(self, symbols: List[str]) -> Dict[str, Any]:
+        """Get real-time data from provider"""
+        pass
+
+
+class YahooFinanceProvider(DataProvider):
+    """Yahoo Finance data provider"""
     
     def __init__(self):
-        """Initialize data collector"""
         self.session = None
-        
-    async def __aenter__(self):
-        """Async context manager entry"""
-        self.session = aiohttp.ClientSession()
-        return self
-        
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        """Async context manager exit"""
-        if self.session:
-            await self.session.close()
-            
-    async def collect_tick_data(self, symbol: str, start_date: datetime, 
-                              end_date: datetime) -> pd.DataFrame:
-        """Collect tick data for a symbol"""
+    
+    async def get_tick_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+        """Get tick data from Yahoo Finance"""
         try:
-            logger.info(f"Collecting tick data for {symbol} from {start_date} to {end_date}")
+            # Convert Chinese symbols to Yahoo Finance format
+            yahoo_symbol = self._convert_symbol_to_yahoo(symbol)
             
-            # For demo purposes, generate sample tick data
-            # In production, this would connect to real data sources
-            tick_data = self._generate_sample_tick_data(symbol, start_date, end_date)
+            # Yahoo Finance doesn't provide tick data, so we'll use 1-minute data
+            ticker = yf.Ticker(yahoo_symbol)
+            data = ticker.history(start=start_date.date(), end=end_date.date(), interval="1m")
             
-            logger.info(f"Collected {len(tick_data)} tick records for {symbol}")
+            if data.empty:
+                logger.warning(f"No data found for {symbol} from Yahoo Finance")
+                return pd.DataFrame()
+            
+            # Convert to our tick data format
+            tick_data = self._convert_yahoo_to_tick_format(data, symbol)
             return tick_data
             
         except Exception as e:
-            logger.error(f"Failed to collect tick data for {symbol}: {e}")
-            raise
-            
-    async def collect_order_book_data(self, symbol: str, start_date: datetime,
-                                    end_date: datetime) -> pd.DataFrame:
-        """Collect order book data for a symbol"""
+            logger.error(f"Failed to get tick data from Yahoo Finance for {symbol}: {e}")
+            return pd.DataFrame()
+    
+    async def get_order_book_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+        """Yahoo Finance doesn't provide order book data, return empty DataFrame"""
+        logger.warning(f"Yahoo Finance doesn't provide order book data for {symbol}")
+        return pd.DataFrame()
+    
+    async def get_real_time_data(self, symbols: List[str]) -> Dict[str, Any]:
+        """Get real-time data from Yahoo Finance"""
         try:
-            logger.info(f"Collecting order book data for {symbol} from {start_date} to {end_date}")
+            real_time_data = {}
             
-            # For demo purposes, generate sample order book data
-            # In production, this would connect to real data sources
-            order_book_data = self._generate_sample_order_book_data(symbol, start_date, end_date)
+            for symbol in symbols:
+                yahoo_symbol = self._convert_symbol_to_yahoo(symbol)
+                ticker = yf.Ticker(yahoo_symbol)
+                info = ticker.info
+                
+                # Get current price and other metrics
+                current_price = info.get('currentPrice', info.get('regularMarketPrice', 0))
+                previous_close = info.get('previousClose', current_price)
+                change_pct = ((current_price - previous_close) / previous_close) if previous_close else 0
+                
+                real_time_data[symbol] = {
+                    'timestamp': datetime.now(pytz.UTC),
+                    'price': current_price,
+                    'volume': info.get('volume', 0),
+                    'bid_price': info.get('bid', current_price * 0.999),
+                    'ask_price': info.get('ask', current_price * 1.001),
+                    'change_pct': change_pct,
+                    'market_cap': info.get('marketCap', 0),
+                    'pe_ratio': info.get('trailingPE', 0)
+                }
             
-            logger.info(f"Collected {len(order_book_data)} order book records for {symbol}")
-            return order_book_data
+            return real_time_data
             
         except Exception as e:
-            logger.error(f"Failed to collect order book data for {symbol}: {e}")
-            raise
+            logger.error(f"Failed to get real-time data from Yahoo Finance: {e}")
+            return {}
+    
+    def _convert_symbol_to_yahoo(self, symbol: str) -> str:
+        """Convert Chinese stock symbols to Yahoo Finance format"""
+        if symbol.endswith('.SH'):
+            # Shanghai Stock Exchange
+            return symbol.replace('.SH', '.SS')
+        elif symbol.endswith('.SZ'):
+            # Shenzhen Stock Exchange
+            return symbol.replace('.SZ', '.SZ')
+        return symbol
+    
+    def _convert_yahoo_to_tick_format(self, yahoo_data: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        """Convert Yahoo Finance data to our tick data format"""
+        if yahoo_data.empty:
+            return pd.DataFrame()
+        
+        # Reset index to get timestamp as column
+        yahoo_data = yahoo_data.reset_index()
+        
+        # Convert to UTC if not already
+        if yahoo_data['Datetime'].dt.tz is None:
+            yahoo_data['Datetime'] = yahoo_data['Datetime'].dt.tz_localize('UTC')
+        else:
+            yahoo_data['Datetime'] = yahoo_data['Datetime'].dt.tz_convert('UTC')
+        
+        # Create tick data format
+        tick_data = pd.DataFrame({
+            'timestamp': yahoo_data['Datetime'],
+            'symbol': symbol,
+            'price': yahoo_data['Close'],
+            'volume': yahoo_data['Volume'],
+            'turnover': yahoo_data['Close'] * yahoo_data['Volume'],
+            'bid_price': [np.array([price * 0.999]) for price in yahoo_data['Close']],
+            'bid_volume': [np.array([vol * 0.3]) for vol in yahoo_data['Volume']],
+            'ask_price': [np.array([price * 1.001]) for price in yahoo_data['Close']],
+            'ask_volume': [np.array([vol * 0.3]) for vol in yahoo_data['Volume']],
+            'trade_direction': np.random.choice([1, -1], len(yahoo_data)),
+            'trade_type': 'NORMAL',
+            'exchange': 'YAHOO',
+            'update_time': yahoo_data['Datetime']
+        })
+        
+        return tick_data
+
+
+class TushareProvider(DataProvider):
+    """Tushare data provider for Chinese stocks"""
+    
+    def __init__(self, token: Optional[str] = None):
+        self.token = token
+        self.session = None
+        
+    async def get_tick_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+        """Get tick data from Tushare"""
+        try:
+            if not self.token:
+                logger.warning("Tushare token not provided, cannot fetch data")
+                return pd.DataFrame()
             
-    def _generate_sample_tick_data(self, symbol: str, start_date: datetime, 
-                                 end_date: datetime) -> pd.DataFrame:
+            # Tushare requires specific setup and API calls
+            # This is a placeholder for actual Tushare implementation
+            logger.info(f"Tushare tick data collection for {symbol} would be implemented here")
+            return pd.DataFrame()
+            
+        except Exception as e:
+            logger.error(f"Failed to get tick data from Tushare for {symbol}: {e}")
+            return pd.DataFrame()
+    
+    async def get_order_book_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+        """Get order book data from Tushare"""
+        try:
+            if not self.token:
+                logger.warning("Tushare token not provided, cannot fetch data")
+                return pd.DataFrame()
+            
+            # Tushare order book implementation would go here
+            logger.info(f"Tushare order book data collection for {symbol} would be implemented here")
+            return pd.DataFrame()
+            
+        except Exception as e:
+            logger.error(f"Failed to get order book data from Tushare for {symbol}: {e}")
+            return pd.DataFrame()
+    
+    async def get_real_time_data(self, symbols: List[str]) -> Dict[str, Any]:
+        """Get real-time data from Tushare"""
+        try:
+            if not self.token:
+                logger.warning("Tushare token not provided, cannot fetch data")
+                return {}
+            
+            # Tushare real-time data implementation would go here
+            logger.info(f"Tushare real-time data collection for {len(symbols)} symbols would be implemented here")
+            return {}
+            
+        except Exception as e:
+            logger.error(f"Failed to get real-time data from Tushare: {e}")
+            return {}
+
+
+class SyntheticDataProvider(DataProvider):
+    """Fallback synthetic data provider (original demo functions)"""
+    
+    async def get_tick_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+        """Generate synthetic tick data"""
+        return self._generate_sample_tick_data(symbol, start_date, end_date)
+    
+    async def get_order_book_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
+        """Generate synthetic order book data"""
+        return self._generate_sample_order_book_data(symbol, start_date, end_date)
+    
+    async def get_real_time_data(self, symbols: List[str]) -> Dict[str, Any]:
+        """Generate synthetic real-time data"""
+        real_time_data = {}
+        for symbol in symbols:
+            real_time_data[symbol] = {
+                'timestamp': datetime.now(pytz.UTC),
+                'price': 100.0 + np.random.normal(0, 1),
+                'volume': np.random.lognormal(8, 1),
+                'bid_price': 99.95 + np.random.normal(0, 0.1),
+                'ask_price': 100.05 + np.random.normal(0, 0.1),
+                'change_pct': np.random.normal(0, 0.02)
+            }
+        return real_time_data
+    
+    def _generate_sample_tick_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """Generate sample tick data for testing"""
         
         # Generate timestamps during market hours (9:30 AM - 3:00 PM China time)
@@ -203,57 +361,180 @@ class DataCollector:
         order_book_data['update_time'] = timestamps_utc
         
         return order_book_data
+
+
+class DataCollector:
+    """Collects market data from various sources with fallback mechanisms"""
+    
+    def __init__(self, providers: Optional[List[DataProvider]] = None, tushare_token: Optional[str] = None):
+        """Initialize data collector with multiple providers"""
+        self.session = None
         
-    async def collect_real_time_data(self, symbols: List[str]) -> Dict[str, Any]:
-        """Collect real-time market data"""
-        try:
-            logger.info(f"Collecting real-time data for {len(symbols)} symbols")
+        # Initialize providers with fallback order
+        if providers is None:
+            self.providers = [
+                YahooFinanceProvider(),
+                TushareProvider(tushare_token),
+                SyntheticDataProvider()  # Fallback to synthetic data
+            ]
+        else:
+            self.providers = providers
+        
+    async def __aenter__(self):
+        """Async context manager entry"""
+        self.session = aiohttp.ClientSession()
+        return self
+        
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        """Async context manager exit"""
+        if self.session:
+            await self.session.close()
             
-            # In production, this would connect to real-time data feeds
-            # For now, return sample data
-            real_time_data = {}
-            
-            for symbol in symbols:
-                real_time_data[symbol] = {
-                    'timestamp': datetime.now(),
-                    'price': 100.0 + np.random.normal(0, 1),
-                    'volume': np.random.lognormal(8, 1),
-                    'bid_price': 99.95 + np.random.normal(0, 0.1),
-                    'ask_price': 100.05 + np.random.normal(0, 0.1),
-                    'change_pct': np.random.normal(0, 0.02)
-                }
+    async def collect_tick_data(self, symbol: str, start_date: datetime,
+                              end_date: datetime) -> pd.DataFrame:
+        """Collect tick data for a symbol using multiple providers with fallback"""
+        logger.info(f"Collecting tick data for {symbol} from {start_date} to {end_date}")
+        
+        for i, provider in enumerate(self.providers):
+            try:
+                provider_name = provider.__class__.__name__
+                logger.info(f"Trying provider {i+1}/{len(self.providers)}: {provider_name}")
                 
-            return real_time_data
+                tick_data = await provider.get_tick_data(symbol, start_date, end_date)
+                
+                if not tick_data.empty:
+                    # Validate data quality
+                    if self.validate_data_quality(tick_data, 'tick_data'):
+                        logger.info(f"Successfully collected {len(tick_data)} tick records for {symbol} from {provider_name}")
+                        return tick_data
+                    else:
+                        logger.warning(f"Data quality validation failed for {provider_name}, trying next provider")
+                        continue
+                else:
+                    logger.warning(f"No data returned from {provider_name}, trying next provider")
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"Provider {provider.__class__.__name__} failed for tick data: {e}")
+                continue
+        
+        # If all providers fail, raise an exception
+        raise Exception(f"All data providers failed to collect tick data for {symbol}")
             
-        except Exception as e:
-            logger.error(f"Failed to collect real-time data: {e}")
-            raise
+    async def collect_order_book_data(self, symbol: str, start_date: datetime,
+                                    end_date: datetime) -> pd.DataFrame:
+        """Collect order book data for a symbol using multiple providers with fallback"""
+        logger.info(f"Collecting order book data for {symbol} from {start_date} to {end_date}")
+        
+        for i, provider in enumerate(self.providers):
+            try:
+                provider_name = provider.__class__.__name__
+                logger.info(f"Trying provider {i+1}/{len(self.providers)}: {provider_name}")
+                
+                order_book_data = await provider.get_order_book_data(symbol, start_date, end_date)
+                
+                if not order_book_data.empty:
+                    # Validate data quality
+                    if self.validate_data_quality(order_book_data, 'order_book'):
+                        logger.info(f"Successfully collected {len(order_book_data)} order book records for {symbol} from {provider_name}")
+                        return order_book_data
+                    else:
+                        logger.warning(f"Data quality validation failed for {provider_name}, trying next provider")
+                        continue
+                else:
+                    logger.warning(f"No data returned from {provider_name}, trying next provider")
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"Provider {provider.__class__.__name__} failed for order book data: {e}")
+                continue
+        
+        # If all providers fail, raise an exception
+        raise Exception(f"All data providers failed to collect order book data for {symbol}")
+            
+    async def collect_real_time_data(self, symbols: List[str]) -> Dict[str, Any]:
+        """Collect real-time market data using multiple providers with fallback"""
+        logger.info(f"Collecting real-time data for {len(symbols)} symbols")
+        
+        for i, provider in enumerate(self.providers):
+            try:
+                provider_name = provider.__class__.__name__
+                logger.info(f"Trying provider {i+1}/{len(self.providers)}: {provider_name}")
+                
+                real_time_data = await provider.get_real_time_data(symbols)
+                
+                if real_time_data:
+                    logger.info(f"Successfully collected real-time data for {len(real_time_data)} symbols from {provider_name}")
+                    return real_time_data
+                else:
+                    logger.warning(f"No real-time data returned from {provider_name}, trying next provider")
+                    continue
+                    
+            except Exception as e:
+                logger.error(f"Provider {provider.__class__.__name__} failed for real-time data: {e}")
+                continue
+        
+        # If all providers fail, raise an exception
+        raise Exception(f"All data providers failed to collect real-time data for symbols: {symbols}")
             
     async def collect_fundamental_data(self, symbol: str) -> Dict[str, Any]:
-        """Collect fundamental data for a symbol"""
+        """Collect fundamental data for a symbol using Yahoo Finance"""
         try:
             logger.info(f"Collecting fundamental data for {symbol}")
             
-            # In production, this would fetch real fundamental data
-            # For now, return sample data
+            # Use Yahoo Finance for fundamental data
+            yahoo_symbol = self._convert_symbol_to_yahoo(symbol)
+            ticker = yf.Ticker(yahoo_symbol)
+            info = ticker.info
+            
             fundamental_data = {
                 'symbol': symbol,
-                'market_cap': np.random.uniform(1e9, 1e12),
-                'pe_ratio': np.random.uniform(5, 50),
-                'pb_ratio': np.random.uniform(0.5, 5),
-                'roe': np.random.uniform(0.05, 0.25),
-                'debt_to_equity': np.random.uniform(0.1, 2.0),
-                'revenue_growth': np.random.uniform(-0.1, 0.3),
-                'profit_margin': np.random.uniform(0.01, 0.2),
-                'dividend_yield': np.random.uniform(0, 0.08),
-                'updated_at': datetime.now()
+                'market_cap': info.get('marketCap', 0),
+                'pe_ratio': info.get('trailingPE', 0),
+                'pb_ratio': info.get('priceToBook', 0),
+                'roe': info.get('returnOnEquity', 0),
+                'debt_to_equity': info.get('debtToEquity', 0),
+                'revenue_growth': info.get('revenueGrowth', 0),
+                'profit_margin': info.get('profitMargins', 0),
+                'dividend_yield': info.get('dividendYield', 0),
+                'enterprise_value': info.get('enterpriseValue', 0),
+                'price_to_sales': info.get('priceToSalesTrailing12Months', 0),
+                'book_value': info.get('bookValue', 0),
+                'earnings_growth': info.get('earningsGrowth', 0),
+                'updated_at': datetime.now(pytz.UTC)
             }
             
             return fundamental_data
             
         except Exception as e:
             logger.error(f"Failed to collect fundamental data for {symbol}: {e}")
-            raise
+            # Return empty data structure on failure
+            return {
+                'symbol': symbol,
+                'market_cap': 0,
+                'pe_ratio': 0,
+                'pb_ratio': 0,
+                'roe': 0,
+                'debt_to_equity': 0,
+                'revenue_growth': 0,
+                'profit_margin': 0,
+                'dividend_yield': 0,
+                'enterprise_value': 0,
+                'price_to_sales': 0,
+                'book_value': 0,
+                'earnings_growth': 0,
+                'updated_at': datetime.now(pytz.UTC)
+            }
+    
+    def _convert_symbol_to_yahoo(self, symbol: str) -> str:
+        """Convert Chinese stock symbols to Yahoo Finance format"""
+        if symbol.endswith('.SH'):
+            # Shanghai Stock Exchange
+            return symbol.replace('.SH', '.SS')
+        elif symbol.endswith('.SZ'):
+            # Shenzhen Stock Exchange
+            return symbol.replace('.SZ', '.SZ')
+        return symbol
             
     def validate_data_quality(self, data: pd.DataFrame, data_type: str) -> bool:
         """Validate data quality"""

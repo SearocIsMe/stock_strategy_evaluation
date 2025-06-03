@@ -1,0 +1,97 @@
+# Data Provider Configuration
+# Configure multiple data sources with fallback mechanisms
+
+providers:
+  # Yahoo Finance - Primary provider for most markets
+  yahoo_finance:
+    enabled: true
+    priority: 1
+    description: "Yahoo Finance API for global market data"
+    supports:
+      - tick_data: true  # 1-minute resolution
+      - order_book: false
+      - real_time: true
+      - fundamental: true
+    rate_limits:
+      requests_per_minute: 2000
+      requests_per_hour: 48000
+    
+  # Tushare - Chinese market specialist
+  tushare:
+    enabled: false  # Requires API token
+    priority: 2
+    description: "Tushare API for Chinese market data"
+    api_token: null  # Set your Tushare token here
+    supports:
+      - tick_data: true
+      - order_book: true
+      - real_time: true
+      - fundamental: true
+    rate_limits:
+      requests_per_minute: 200
+      requests_per_hour: 10000
+    
+  # Synthetic Data - Fallback provider
+  synthetic:
+    enabled: true
+    priority: 99  # Always last fallback
+    description: "Synthetic data generator for testing and fallback"
+    supports:
+      - tick_data: true
+      - order_book: true
+      - real_time: true
+      - fundamental: false
+
+# Symbol mapping for different exchanges
+symbol_mapping:
+  # Chinese exchanges
+  shanghai:
+    suffix: ".SH"
+    yahoo_suffix: ".SS"
+    exchange_code: "SSE"
+    timezone: "Asia/Shanghai"
+    market_hours:
+      open: "09:30"
+      close: "15:00"
+      
+  shenzhen:
+    suffix: ".SZ"
+    yahoo_suffix: ".SZ"
+    exchange_code: "SZSE"
+    timezone: "Asia/Shanghai"
+    market_hours:
+      open: "09:30"
+      close: "15:00"
+
+# Data quality settings
+data_quality:
+  validation:
+    enabled: true
+    check_timestamps: true
+    check_null_values: true
+    check_price_ranges: true
+    
+  price_validation:
+    min_price: 0.01
+    max_price: 10000.0
+    max_price_change_pct: 0.20  # 20% max change per period
+    
+  volume_validation:
+    min_volume: 0
+    max_volume: 1000000000  # 1 billion shares
+    
+# Retry and timeout settings
+network:
+  timeout_seconds: 30
+  max_retries: 3
+  retry_delay_seconds: 1
+  backoff_multiplier: 2.0
+
+# Caching settings
+cache:
+  enabled: true
+  ttl_seconds:
+    tick_data: 300      # 5 minutes
+    order_book: 60      # 1 minute
+    real_time: 30       # 30 seconds
+    fundamental: 3600   # 1 hour
