@@ -38,7 +38,7 @@ class ModelTrainingPipeline:
         self.client = ClickHouseClient(config_path)
         self.reader = DataReader(self.client)
         
-    async def run_training(self, symbols: List[str], 
+    async def run_training(self, symbols: List[str],
                           start_date: Optional[datetime] = None,
                           end_date: Optional[datetime] = None,
                           model_types: List[str] = None) -> None:
@@ -52,7 +52,16 @@ class ModelTrainingPipeline:
         if end_date is None:
             end_date = datetime.now() - timedelta(days=1)
             
+        # Handle "ALL" symbols parameter
+        if len(symbols) == 1 and symbols[0].upper() == "ALL":
+            logger.info("Fetching all available symbols from database...")
+            symbols = self.reader.get_symbol_universe(active_only=True)
+            if not symbols:
+                logger.info("No symbols found in database, using default symbol list...")
+                symbols = ['000001.SZ', '000002.SZ', '600000.SH', '600036.SH', '600519.SH']
+            
         logger.info(f"Starting model training for {len(symbols)} symbols")
+        logger.info(f"Symbols: {symbols[:10]}{'...' if len(symbols) > 10 else ''}")
         logger.info(f"Date range: {start_date} to {end_date}")
         logger.info(f"Model types: {model_types}")
         
@@ -261,8 +270,8 @@ class ModelTrainingPipeline:
 def main():
     """Main entry point"""
     parser = argparse.ArgumentParser(description='Run model training pipeline')
-    parser.add_argument('--symbols', nargs='+', default=['000001.SZ', '000002.SZ'], 
-                       help='Stock symbols to train on')
+    parser.add_argument('--symbols', nargs='+', default=['000001.SZ', '000002.SZ'],
+                       help='Stock symbols to train on. Use "ALL" to train on all available symbols from database')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, help='End date (YYYY-MM-DD)')
     parser.add_argument('--model-types', nargs='+', 
