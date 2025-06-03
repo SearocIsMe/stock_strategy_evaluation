@@ -12,9 +12,9 @@ YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
 # Configuration
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+PROJECT_DIR="$pwd"
 PYTHON_MIN_VERSION="3.10"  # Minimum Python version required
-VENV_NAME="venv"
+VENV_NAME="factor-quant"
 CLICKHOUSE_VERSION="23.8"
 DOCKER_COMPOSE_FILE="$PROJECT_DIR/infrastructure/deploy/docker-compose.yml"
 
@@ -205,7 +205,7 @@ services:
     ports:
       - "6379:6379"
     volumes:
-      - redis_data:/data
+      - redis_data:./data
     command: redis-server --appendonly yes
     restart: unless-stopped
     healthcheck:
