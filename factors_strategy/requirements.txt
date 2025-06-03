@@ -1,184 +1,56 @@
-# Python 3.12+ Required
-# Core Dependencies
+# Essential Dependencies for Stock Strategy Evaluation System
+# Python 3.10+ Required
+
+# Core Data Processing
 numpy==1.26.4
 pandas==2.2.0
 scipy==1.12.0
-scikit-learn==1.4.0
 
 # Database Drivers
 clickhouse-driver==0.2.7
 clickhouse-connect==0.7.0
-# Note: DolphinDB Python API version may vary
-dolphindb==3.0.2.2
 
-# Deep Learning - PyTorch 2.5+ (2.6 has compatibility issues with torchvision)
+# Machine Learning - Core
+scikit-learn==1.4.0
+xgboost==2.0.3
+lightgbm==4.3.0
+joblib==1.3.2
+
+# Deep Learning - PyTorch
 torch==2.5.0
 torchvision==0.20.0
 torchaudio==2.5.0
-# For CUDA 12.1 support, install with:
-# pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121
 
-# TensorFlow (optional, for comparison)
-tensorflow==2.19.0
-keras==3.5.0  # Updated for TensorFlow 2.19.0 compatibility
-
-# Machine Learning
-xgboost==2.0.3
-lightgbm==4.3.0
-# catboost==1.2.2  # EXCLUDED: PyYAML build conflict with Python 3.12
-
-# Time Series
-statsmodels==0.14.1
-arch==6.3.0
-prophet==1.1.5
-
-# Data Processing
-pyarrow==15.0.0
-fastparquet==2024.2.0
+# Performance Optimization
 numba==0.59.0
-dask==2024.1.1
-polars==0.20.6  # Alternative to pandas for better performance
 
-# Visualization
-matplotlib==3.8.2
-seaborn==0.13.2
+# Visualization & Dashboard
 plotly==5.18.0
 dash==2.14.2
 dash-bootstrap-components==1.5.0
 
-# API & Web
-fastapi==0.109.0
-uvicorn==0.27.0
-httpx==0.26.0  # Modern replacement for requests
-aiohttp==3.9.3
-pydantic==2.5.3
-pydantic-settings==2.1.0
-
-# Configuration
-pyyaml==6.0.1  # Fixed version for Python 3.12 compatibility
+# Configuration & Utilities
+pyyaml==6.0.1
 python-dotenv==1.0.1
-omegaconf==2.3.0  # Advanced configuration management
-
-# Monitoring & Logging
-prometheus-client==0.19.0
-loguru==0.7.2
-structlog==24.1.0  # Structured logging
-sentry-sdk==1.40.0
-
-# Testing
-pytest==8.0.0
-pytest-asyncio==0.23.3
-pytest-cov==4.1.0
-pytest-mock==3.12.0
-hypothesis==6.96.1  # Property-based testing
-
-# Development Tools
-black==24.1.1
-ruff==0.1.14  # Fast Python linter
-mypy==1.8.0
-pre-commit==3.6.0
-ipython==8.20.0
-jupyter==1.0.0
-notebook==7.0.7
-
-# LLM Integration
-openai==1.10.0
-transformers==4.37.2
-langchain==0.1.4
-langchain-community==0.0.16
-# chromadb==0.4.22  # EXCLUDED: Requires C++11 compiler
-tiktoken==0.5.2  # Token counting for LLMs
-
-# Backtesting
-vectorbt==0.26.2  # Modern backtesting framework
-backtrader==1.9.78.123
-# zipline-reloaded==3.0.3  # EXCLUDED: Requires compilation
-pyfolio-reloaded==0.9.5
-
-# Technical Analysis
-# ta-lib==0.4.28  # EXCLUDED: Requires TA-Lib C library and gcc
-pandas-ta==0.3.14b0
-# tulipy==0.4.0  # EXCLUDED: Requires gcc compiler
-
-# Utilities
-tqdm==4.66.1
-joblib==1.3.2
-redis==5.0.1
-celery==5.3.6
-click==8.1.7  # CLI framework
-rich==13.7.0  # Rich terminal output
-typer==0.9.0  # Modern CLI apps
-
-# Infrastructure
-docker==7.0.0
-kubernetes==29.0.0
-ansible==9.1.0
-fabric==3.2.2  # SSH automation
 
 # Async Support
-anyio==4.2.0
-aiofiles==23.2.1
-aiomultiprocess==0.9.0
-asyncpg==0.29.0  # Async PostgreSQL
+aiohttp==3.9.3
 
-# Data Validation
-great-expectations==0.18.8
-pandera==0.17.2
-marshmallow==3.20.2
-
-# Feature Engineering
-featuretools==1.28.0
-tsfresh==0.20.2
-category-encoders==2.6.3
-
-# Optimization
-optuna==3.5.0
-hyperopt==0.2.7
-scikit-optimize==0.9.0
-ray[tune]==2.31.0  # Distributed hyperparameter tuning - updated to available version
-
-# Additional ML Tools
-imbalanced-learn==0.11.0
-mlflow==2.10.0  # ML experiment tracking
-wandb==0.16.2  # Weights & Biases tracking
-# shap==0.44.1  # EXCLUDED: Requires g++ compiler
-
-# Profiling & Performance
-py-spy==0.3.14  # Sampling profiler
-memory-profiler==0.61.0
-line-profiler==4.1.2
-# scalene==1.5.38  # EXCLUDED: Requires 'make' command
-
-# Color output for terminal
+# Logging & Monitoring
 colorama==0.4.6
-termcolor==2.4.0
 
-# Additional dependencies for production
-gunicorn==21.2.0  # WSGI server
-supervisor==4.2.5  # Process manager
-# ===== IMPORTANT: COMPILATION REQUIREMENTS =====
-# Some packages were excluded because they require C/C++ compilers:
-#
-# To install build tools on Ubuntu/Debian:
-# sudo apt-get update && sudo apt-get install build-essential
-#
-# To install build tools on CentOS/RHEL/Fedora:
-# sudo yum groupinstall "Development Tools"
-#
-# After installing build tools, you can install the excluded packages:
-# - catboost==1.2.2
-# - ta-lib==0.4.28 (also requires TA-Lib C library)
-# - tulipy==0.4.0
-# - zipline-reloaded==3.0.3
-# - chromadb==0.4.22
-# - shap==0.44.1
-# - scalene==1.5.38
-#
-# For TA-Lib specifically:
-# wget http://prdownloads.sourceforge.net/ta-lib/ta-lib-0.4.0-src.tar.gz
-# tar -xzf ta-lib-0.4.0-src.tar.gz
-# cd ta-lib/
-# ./configure --prefix=/usr
-# make
-# sudo make install
-python-json-logger==2.0.7  # JSON logging
+# Development & Testing
+pytest==8.0.0
+pytest-asyncio==0.23.3
+
+# Optional: For enhanced functionality
+# Uncomment if needed:
+# fastapi==0.109.0          # For API endpoints
+# uvicorn==0.27.0           # ASGI server
+# redis==5.0.1              # For caching
+# prometheus-client==0.19.0 # For monitoring
+# matplotlib==3.8.2        # Additional plotting
+# seaborn==0.13.2          # Statistical visualization
+
+# Note: For CUDA support, install PyTorch with:
+# pip install torch==2.5.0 torchvision==0.20.0 torchaudio==2.5.0 --index-url https://download.pytorch.org/whl/cu121

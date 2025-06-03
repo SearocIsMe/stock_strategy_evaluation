@@ -80,7 +80,7 @@ class SchemaManager:
         ENGINE = {config['engine']}()
         PARTITION BY {config['partition_by']}
         ORDER BY {config['order_by']}
-        TTL {config['ttl']}
+        TTL toDateTime(timestamp) + INTERVAL 5 YEAR
         SETTINGS index_granularity = 8192
         """
         

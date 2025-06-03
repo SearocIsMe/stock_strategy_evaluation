@@ -204,7 +204,7 @@ services:
     image: redis:7-alpine
     container_name: stock_strategy_redis
     ports:
-      - "6379:6379"
+      - "6380:6380"
     volumes:
       - redis_data:/data
     command: redis-server --appendonly yes
@@ -351,7 +351,7 @@ scrape_configs:
         
   - job_name: 'redis'
     static_configs:
-      - targets: ['redis:6379']
+      - targets: ['redis:6380']
         
   - job_name: 'strategy_app'
     static_configs:
@@ -471,7 +471,7 @@ echo -e "\nService URLs:"
 echo -e "  - ClickHouse HTTP: http://localhost:8123"
 echo -e "  - Grafana: http://localhost:3000 (admin/admin)"
 echo -e "  - Prometheus: http://localhost:9090"
-echo -e "  - Redis: localhost:6379"
+echo -e "  - Redis: localhost:6380"
 echo -e "\nPython Version: $(python3 --version)"
 echo -e "PyTorch Version: $(python -c 'import torch; print(f"PyTorch {torch.__version__}")')"
 echo -e "\nNext steps:"
