@@ -50,10 +50,10 @@ def test_python_version():
     print_header("Python Version Check")
     
     version = sys.version_info
-    if version.major == 3 and version.minor >= 12:
+    if version.major == 3 and version.minor >= 10:
         print_success(f"Python {version.major}.{version.minor}.{version.micro}")
     else:
-        print_error(f"Python {version.major}.{version.minor}.{version.micro} - Requires 3.12+")
+        print_error(f"Python {version.major}.{version.minor}.{version.micro} - Requires 3.10+")
         return False
     return True
 
@@ -78,9 +78,10 @@ def test_imports():
             
             # Special check for PyTorch version
             if module_name == 'torch':
-                torch_major, torch_minor = version.split('.')[:2]
-                if int(torch_major) < 2 or (int(torch_major) == 2 and int(torch_minor) < 6):
-                    print_error(f"  PyTorch version {version} is too old. Requires 2.6.0+")
+                torch_version_clean = version.split('+')[0]  # Remove +cu124 suffix
+                torch_major, torch_minor = torch_version_clean.split('.')[:2]
+                if int(torch_major) < 2 or (int(torch_major) == 2 and int(torch_minor) < 0):
+                    print_error(f"  PyTorch version {version} is too old. Requires 2.0.0+")
                     all_good = False
                     
         except Exception as e:
@@ -380,8 +381,8 @@ def main():
         print("- Install missing packages: pip install -r requirements.txt")
         print("- Start services: ./infrastructure/deploy/setup.sh")
         print("- Check configuration files in config/")
-        print("- Ensure Python 3.12+ is installed")
-        print("- Ensure PyTorch 2.6.0+ is installed")
+        print("- Ensure Python 3.10+ is installed")
+        print("- Ensure PyTorch 2.0.0+ is installed")
     
     return passed == total
 
