@@ -14,6 +14,8 @@ import pytz
 import yfinance as yf
 import requests
 from abc import ABC, abstractmethod
+import yaml
+from pathlib import Path
 
 # Configure enhanced logging
 logging.basicConfig(
@@ -39,6 +41,11 @@ class DataProvider(ABC):
     @abstractmethod
     async def get_real_time_data(self, symbols: List[str]) -> Dict[str, Any]:
         """Get real-time data from provider"""
+        pass
+    
+    @abstractmethod
+    async def get_available_symbols(self) -> List[str]:
+        """Get list of available symbols from provider"""
         pass
 
 
@@ -107,6 +114,29 @@ class YahooFinanceProvider(DataProvider):
             logger.error(f"Failed to get real-time data from Yahoo Finance: {e}")
             return {}
     
+    async def get_available_symbols(self) -> List[str]:
+        """Get available symbols from Yahoo Finance"""
+        try:
+            # For Chinese markets, we can use predefined lists or scrape from Yahoo Finance
+            # This is a simplified version - in production, you might want to fetch from Yahoo's screener
+            chinese_symbols = []
+            
+            # Shanghai Stock Exchange (SSE) - 600xxx, 601xxx, 603xxx, 605xxx, 688xxx
+            # Shenzhen Stock Exchange (SZSE) - 000xxx, 001xxx, 002xxx, 003xxx, 300xxx
+            
+            # For demo purposes, returning a subset of major Chinese stocks
+            major_chinese_stocks = [
+                '000001.SZ', '000002.SZ', '000858.SZ', '000725.SZ', '000776.SZ',
+                '600000.SH', '600036.SH', '600519.SH', '600887.SH', '600276.SH',
+                '002415.SZ', '300059.SZ', '300750.SZ', '002594.SZ'
+            ]
+            
+            return major_chinese_stocks
+            
+        except Exception as e:
+            logger.error(f"Failed to get available symbols from Yahoo Finance: {e}")
+            return []
+    
     def _convert_symbol_to_yahoo(self, symbol: str) -> str:
         """Convert Chinese stock symbols to Yahoo Finance format"""
         if symbol.endswith('.SH'):
@@ -157,18 +187,42 @@ class TushareProvider(DataProvider):
     def __init__(self, token: Optional[str] = None):
         self.token = token
         self.session = None
+        self.ts = None
+        
+        if self.token:
+            try:
+                import tushare as ts
+                ts.set_token(self.token)
+                self.ts = ts.pro_api()
+                logger.info(f"Tushare API initialized successfully: {token}")
+            except Exception as e:
+                logger.error(f"Failed to initialize Tushare API: {e}")
         
     async def get_tick_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """Get tick data from Tushare"""
         try:
-            if not self.token:
-                logger.warning("Tushare token not provided, cannot fetch data")
+            if not self.token or not self.ts:
+                logger.warning("Tushare token not provided or API not initialized")
+                return pd.DataFrame()
+
+            # Convert symbol format for Tushare (e.g., 000001.SZ -> 000001.SZ)
+            ts_symbol = symbol
+            
+            # Get minute-level data from Tushare
+            df = self.ts.stk_mins(
+                ts_code=ts_symbol,
+                freq='1min',
+                start_date=start_date.strftime('%Y%m%d %H:%M:%S'),
+                end_date=end_date.strftime('%Y%m%d %H:%M:%S')
+            )
+            
+            if df.empty:
+                logger.warning(f"No tick data found for {symbol} from Tushare")
                 return pd.DataFrame()
             
-            # Tushare requires specific setup and API calls
-            # This is a placeholder for actual Tushare implementation
-            logger.info(f"Tushare tick data collection for {symbol} would be implemented here")
-            return pd.DataFrame()
+            # Convert to our tick data format
+            tick_data = self._convert_tushare_to_tick_format(df, symbol)
+            return tick_data
             
         except Exception as e:
             logger.error(f"Failed to get tick data from Tushare for {symbol}: {e}")
@@ -177,11 +231,12 @@ class TushareProvider(DataProvider):
     async def get_order_book_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """Get order book data from Tushare"""
         try:
-            if not self.token:
-                logger.warning("Tushare token not provided, cannot fetch data")
+            if not self.token or not self.ts:
+                logger.warning("Tushare token not provided or API not initialized")
                 return pd.DataFrame()
             
-            # Tushare order book implementation would go here
+            # Tushare provides level 2 data which includes order book
+            # This would require additional Tushare permissions
             logger.info(f"Tushare order book data collection for {symbol} would be implemented here")
             return pd.DataFrame()
             
@@ -192,17 +247,90 @@ class TushareProvider(DataProvider):
     async def get_real_time_data(self, symbols: List[str]) -> Dict[str, Any]:
         """Get real-time data from Tushare"""
         try:
-            if not self.token:
-                logger.warning("Tushare token not provided, cannot fetch data")
+            if not self.token or not self.ts:
+                logger.warning("Tushare token not provided or API not initialized")
                 return {}
             
-            # Tushare real-time data implementation would go here
-            logger.info(f"Tushare real-time data collection for {len(symbols)} symbols would be implemented here")
-            return {}
+            real_time_data = {}
+            
+            # Get real-time quotes from Tushare
+            for symbol in symbols:
+                try:
+                    df = self.ts.realtime_quote(ts_code=symbol)
+                    if not df.empty:
+                        row = df.iloc[0]
+                        real_time_data[symbol] = {
+                            'timestamp': datetime.now(pytz.UTC),
+                            'price': float(row['price']),
+                            'volume': float(row['volume']),
+                            'bid_price': float(row['bid']),
+                            'ask_price': float(row['ask']),
+                            'change_pct': float(row['pct_change']) / 100,
+                            'market_cap': float(row.get('total_mv', 0)) * 10000,  # Convert to yuan
+                            'pe_ratio': float(row.get('pe', 0))
+                        }
+                except Exception as e:
+                    logger.error(f"Failed to get real-time data for {symbol}: {e}")
+            
+            return real_time_data
             
         except Exception as e:
             logger.error(f"Failed to get real-time data from Tushare: {e}")
             return {}
+    
+    async def get_available_symbols(self) -> List[str]:
+        """Get list of available symbols from Tushare"""
+        try:
+            if not self.token or not self.ts:
+                logger.warning("Tushare token not provided or API not initialized")
+                return []
+            
+            # Get stock list from Tushare
+            df = self.ts.stock_basic(exchange='', list_status='L', fields='ts_code,symbol,name,area,industry,list_date')
+            
+            if df.empty:
+                logger.warning("No symbols found from Tushare")
+                return []
+            
+            # Return list of ts_codes (e.g., 000001.SZ, 600000.SH)
+            symbols = df['ts_code'].tolist()
+            logger.info(f"Found {len(symbols)} symbols from Tushare")
+            return symbols
+            
+        except Exception as e:
+            logger.error(f"Failed to get available symbols from Tushare: {e}")
+            return []
+    
+    def _convert_tushare_to_tick_format(self, tushare_data: pd.DataFrame, symbol: str) -> pd.DataFrame:
+        """Convert Tushare data to our tick data format"""
+        if tushare_data.empty:
+            return pd.DataFrame()
+        
+        # Convert Tushare timestamp to datetime
+        tushare_data['timestamp'] = pd.to_datetime(tushare_data['trade_time'])
+        
+        # Ensure UTC timezone
+        if tushare_data['timestamp'].dt.tz is None:
+            tushare_data['timestamp'] = tushare_data['timestamp'].dt.tz_localize('Asia/Shanghai').dt.tz_convert('UTC')
+        
+        # Create tick data format
+        tick_data = pd.DataFrame({
+            'timestamp': tushare_data['timestamp'],
+            'symbol': symbol,
+            'price': tushare_data['close'],
+            'volume': tushare_data['vol'],
+            'turnover': tushare_data['amount'],
+            'bid_price': [np.array([price]) for price in tushare_data['close'] * 0.999],
+            'bid_volume': [np.array([vol * 0.3]) for vol in tushare_data['vol']],
+            'ask_price': [np.array([price]) for price in tushare_data['close'] * 1.001],
+            'ask_volume': [np.array([vol * 0.3]) for vol in tushare_data['vol']],
+            'trade_direction': np.where(tushare_data['close'] > tushare_data['open'], 1, -1),
+            'trade_type': 'NORMAL',
+            'exchange': 'TUSHARE',
+            'update_time': tushare_data['timestamp']
+        })
+        
+        return tick_data
 
 
 class SyntheticDataProvider(DataProvider):
@@ -229,6 +357,32 @@ class SyntheticDataProvider(DataProvider):
                 'change_pct': np.random.normal(0, 0.02)
             }
         return real_time_data
+    
+    async def get_available_symbols(self) -> List[str]:
+        """Get synthetic list of available symbols"""
+        # Return comprehensive list of Chinese stock symbols for testing
+        return [
+            # Major indices components and blue chips
+            '000001.SZ', '000002.SZ', '000858.SZ', '000725.SZ', '000776.SZ',
+            '600000.SH', '600036.SH', '600519.SH', '600887.SH', '600276.SH',
+            '000858.SZ', '002415.SZ', '300059.SZ', '300750.SZ', '002594.SZ',
+            
+            # Technology stocks
+            '000063.SZ', '002230.SZ', '002241.SZ', '300014.SZ', '300033.SZ',
+            '300122.SZ', '300124.SZ', '300136.SZ', '300408.SZ', '300433.SZ',
+            
+            # Financial sector
+            '000001.SZ', '600000.SH', '600015.SH', '600016.SH', '600036.SH',
+            '600837.SH', '600886.SH', '601009.SH', '601166.SH', '601169.SH',
+            
+            # Consumer goods
+            '000568.SZ', '000596.SZ', '000858.SZ', '000895.SZ', '002304.SZ',
+            '600519.SH', '600887.SH', '600999.SH', '603288.SH', '603369.SH',
+            
+            # Healthcare & Pharma
+            '000661.SZ', '000963.SZ', '002007.SZ', '002022.SZ', '002252.SZ',
+            '002422.SZ', '002821.SZ', '300003.SZ', '300015.SZ', '300142.SZ'
+        ]
     
     def _generate_sample_tick_data(self, symbol: str, start_date: datetime, end_date: datetime) -> pd.DataFrame:
         """Generate sample tick data for testing"""
@@ -362,23 +516,67 @@ class SyntheticDataProvider(DataProvider):
         
         return order_book_data
 
-
 class DataCollector:
     """Collects market data from various sources with fallback mechanisms"""
     
-    def __init__(self, providers: Optional[List[DataProvider]] = None, tushare_token: Optional[str] = None):
-        """Initialize data collector with multiple providers"""
+    def __init__(self, config_path: Optional[str] = None):
+        """Initialize data collector with configuration"""
         self.session = None
+        self.providers = {}
+        self.provider_order = []
         
-        # Initialize providers with fallback order
-        if providers is None:
-            self.providers = [
-                YahooFinanceProvider(),
-                TushareProvider(tushare_token),
-                SyntheticDataProvider()  # Fallback to synthetic data
-            ]
-        else:
-            self.providers = providers
+        # Load configuration
+        if config_path is None:
+            config_path = Path(__file__).parent.parent.parent / "config" / "data_providers.yaml"
+        
+        self._load_config(config_path)
+        self._initialize_providers()
+        
+    def _load_config(self, config_path: str):
+        """Load configuration from YAML file"""
+        try:
+            with open(config_path, 'r') as f:
+                self.config = yaml.safe_load(f)
+            logger.info(f"Loaded configuration from {config_path}")
+        except Exception as e:
+            logger.error(f"Failed to load configuration: {e}")
+            self.config = {'providers': {}}
+    
+    def _initialize_providers(self):
+        """Initialize data providers based on configuration"""
+        providers_config = self.config.get('providers', {})
+        
+        # Sort providers by priority (lower number = higher priority)
+        sorted_providers = sorted(
+            [(name, cfg) for name, cfg in providers_config.items() if cfg.get('enabled', False)],
+            key=lambda x: x[1].get('priority', 999)
+        )
+        
+        for provider_name, provider_config in sorted_providers:
+            try:
+                if provider_name == 'yahoo_finance':
+                    provider = YahooFinanceProvider()
+                elif provider_name == 'tushare':
+                    token = provider_config.get('api_token')
+                    provider = TushareProvider(token)
+                elif provider_name == 'synthetic':
+                    provider = SyntheticDataProvider()
+                else:
+                    logger.warning(f"Unknown provider type: {provider_name}")
+                    continue
+                
+                self.providers[provider_name] = provider
+                self.provider_order.append(provider_name)
+                logger.info(f"Initialized provider: {provider_name} (priority: {provider_config.get('priority', 999)})")
+                
+            except Exception as e:
+                logger.error(f"Failed to initialize provider {provider_name}: {e}")
+        
+        # If no providers are enabled, use synthetic as fallback
+        if not self.providers:
+            logger.warning("No providers enabled, using synthetic data provider as fallback")
+            self.providers['synthetic'] = SyntheticDataProvider()
+            self.provider_order.append('synthetic')
         
     async def __aenter__(self):
         """Async context manager entry"""
@@ -389,16 +587,39 @@ class DataCollector:
         """Async context manager exit"""
         if self.session:
             await self.session.close()
+    
+    async def get_available_symbols(self) -> List[str]:
+        """Get available symbols from enabled providers"""
+        all_symbols = set()
+        
+        for provider_name in self.provider_order:
+            provider = self.providers[provider_name]
+            try:
+                logger.info(f"Getting available symbols from {provider_name}")
+                symbols = await provider.get_available_symbols()
+                
+                if symbols:
+                    all_symbols.update(symbols)
+                    logger.info(f"Got {len(symbols)} symbols from {provider_name}")
+                    # If we get symbols from a real provider, we can stop
+                    if provider_name != 'synthetic':
+                        break
+                        
+            except Exception as e:
+                logger.error(f"Failed to get symbols from {provider_name}: {e}")
+                continue
+        
+        return sorted(list(all_symbols))
             
     async def collect_tick_data(self, symbol: str, start_date: datetime,
                               end_date: datetime) -> pd.DataFrame:
         """Collect tick data for a symbol using multiple providers with fallback"""
         logger.info(f"Collecting tick data for {symbol} from {start_date} to {end_date}")
         
-        for i, provider in enumerate(self.providers):
+        for provider_name in self.provider_order:
+            provider = self.providers[provider_name]
             try:
-                provider_name = provider.__class__.__name__
-                logger.info(f"Trying provider {i+1}/{len(self.providers)}: {provider_name}")
+                logger.info(f"Trying provider: {provider_name}")
                 
                 tick_data = await provider.get_tick_data(symbol, start_date, end_date)
                 
@@ -415,7 +636,7 @@ class DataCollector:
                     continue
                     
             except Exception as e:
-                logger.error(f"Provider {provider.__class__.__name__} failed for tick data: {e}")
+                logger.error(f"Provider {provider_name} failed for tick data: {e}")
                 continue
         
         # If all providers fail, raise an exception
@@ -426,10 +647,10 @@ class DataCollector:
         """Collect order book data for a symbol using multiple providers with fallback"""
         logger.info(f"Collecting order book data for {symbol} from {start_date} to {end_date}")
         
-        for i, provider in enumerate(self.providers):
+        for provider_name in self.provider_order:
+            provider = self.providers[provider_name]
             try:
-                provider_name = provider.__class__.__name__
-                logger.info(f"Trying provider {i+1}/{len(self.providers)}: {provider_name}")
+                logger.info(f"Trying provider: {provider_name}")
                 
                 order_book_data = await provider.get_order_book_data(symbol, start_date, end_date)
                 
@@ -446,7 +667,7 @@ class DataCollector:
                     continue
                     
             except Exception as e:
-                logger.error(f"Provider {provider.__class__.__name__} failed for order book data: {e}")
+                logger.error(f"Provider {provider_name} failed for order book data: {e}")
                 continue
         
         # If all providers fail, raise an exception
@@ -456,10 +677,10 @@ class DataCollector:
         """Collect real-time market data using multiple providers with fallback"""
         logger.info(f"Collecting real-time data for {len(symbols)} symbols")
         
-        for i, provider in enumerate(self.providers):
+        for provider_name in self.provider_order:
+            provider = self.providers[provider_name]
             try:
-                provider_name = provider.__class__.__name__
-                logger.info(f"Trying provider {i+1}/{len(self.providers)}: {provider_name}")
+                logger.info(f"Trying provider: {provider_name}")
                 
                 real_time_data = await provider.get_real_time_data(symbols)
                 
@@ -471,7 +692,7 @@ class DataCollector:
                     continue
                     
             except Exception as e:
-                logger.error(f"Provider {provider.__class__.__name__} failed for real-time data: {e}")
+                logger.error(f"Provider {provider_name} failed for real-time data: {e}")
                 continue
         
         # If all providers fail, raise an exception
@@ -498,34 +719,39 @@ class DataCollector:
                 'profit_margin': info.get('profitMargins', 0),
                 'dividend_yield': info.get('dividendYield', 0),
                 'enterprise_value': info.get('enterpriseValue', 0),
-                'price_to_sales': info.get('priceToSalesTrailing12Months', 0),
+                'beta': info.get('beta', 0),
+                'forward_pe': info.get('forwardPE', 0),
+                'peg_ratio': info.get('pegRatio', 0),
                 'book_value': info.get('bookValue', 0),
                 'earnings_growth': info.get('earningsGrowth', 0),
-                'updated_at': datetime.now(pytz.UTC)
+                'current_ratio': info.get('currentRatio', 0),
+                'quick_ratio': info.get('quickRatio', 0),
+                'operating_margin': info.get('operatingMargins', 0),
+                'gross_margin': info.get('grossMargins', 0),
+                'ebitda_margin': info.get('ebitdaMargins', 0),
+                'revenue_per_share': info.get('revenuePerShare', 0),
+                'earnings_per_share': info.get('trailingEps', 0),
+                'free_cash_flow': info.get('freeCashflow', 0),
+                'operating_cash_flow': info.get('operatingCashflow', 0),
+                'total_cash': info.get('totalCash', 0),
+                'total_debt': info.get('totalDebt', 0),
+                'shares_outstanding': info.get('sharesOutstanding', 0),
+                'float_shares': info.get('floatShares', 0),
+                'avg_volume_10d': info.get('averageVolume10days', 0),
+                'avg_volume': info.get('averageVolume', 0),
+                'shares_short': info.get('sharesShort', 0),
+                'short_ratio': info.get('shortRatio', 0),
+                'held_by_insiders': info.get('heldPercentInsiders', 0),
+                'held_by_institutions': info.get('heldPercentInstitutions', 0)
             }
             
+            logger.info(f"Successfully collected fundamental data for {symbol}")
             return fundamental_data
             
         except Exception as e:
             logger.error(f"Failed to collect fundamental data for {symbol}: {e}")
-            # Return empty data structure on failure
-            return {
-                'symbol': symbol,
-                'market_cap': 0,
-                'pe_ratio': 0,
-                'pb_ratio': 0,
-                'roe': 0,
-                'debt_to_equity': 0,
-                'revenue_growth': 0,
-                'profit_margin': 0,
-                'dividend_yield': 0,
-                'enterprise_value': 0,
-                'price_to_sales': 0,
-                'book_value': 0,
-                'earnings_growth': 0,
-                'updated_at': datetime.now(pytz.UTC)
-            }
-    
+            return {}
+            
     def _convert_symbol_to_yahoo(self, symbol: str) -> str:
         """Convert Chinese stock symbols to Yahoo Finance format"""
         if symbol.endswith('.SH'):
@@ -540,36 +766,41 @@ class DataCollector:
         """Validate data quality"""
         try:
             if data.empty:
-                logger.warning(f"Empty {data_type} dataset")
                 return False
                 
-            # Check for required columns
-            required_columns = {
-                'tick_data': ['timestamp', 'symbol', 'price', 'volume'],
-                'order_book': ['timestamp', 'symbol', 'bid_price_1', 'ask_price_1']
-            }
-            
-            if data_type in required_columns:
-                missing_cols = set(required_columns[data_type]) - set(data.columns)
-                if missing_cols:
-                    logger.error(f"Missing required columns for {data_type}: {missing_cols}")
+            # Check for required columns based on data type
+            if data_type == 'tick_data':
+                required_columns = ['timestamp', 'symbol', 'price', 'volume']
+            elif data_type == 'order_book':
+                required_columns = ['timestamp', 'symbol', 'bid_price_1', 'ask_price_1']
+            else:
+                return True
+                
+            # Check if all required columns exist
+            missing_columns = [col for col in required_columns if col not in data.columns]
+            if missing_columns:
+                logger.warning(f"Missing required columns: {missing_columns}")
+                return False
+                
+            # Check for null values in critical columns
+            if data[required_columns].isnull().any().any():
+                logger.warning("Found null values in critical columns")
+                return False
+                
+            # Check for reasonable price ranges
+            if 'price' in data.columns:
+                if (data['price'] <= 0).any() or (data['price'] > 10000).any():
+                    logger.warning("Found unreasonable price values")
                     return False
                     
-            # Check for null values in critical columns
-            if data_type == 'tick_data':
-                critical_cols = ['timestamp', 'symbol', 'price']
-                null_counts = data[critical_cols].isnull().sum()
-                if null_counts.any():
-                    logger.warning(f"Null values found in critical columns: {null_counts}")
+            # Check for reasonable volume ranges
+            if 'volume' in data.columns:
+                if (data['volume'] < 0).any():
+                    logger.warning("Found negative volume values")
+                    return False
                     
-            # Check timestamp ordering
-            if 'timestamp' in data.columns:
-                if not data['timestamp'].is_monotonic_increasing:
-                    logger.warning(f"Timestamps not in ascending order for {data_type}")
-                    
-            logger.info(f"Data quality validation passed for {data_type}")
             return True
             
         except Exception as e:
-            logger.error(f"Data quality validation failed for {data_type}: {e}")
+            logger.error(f"Error during data quality validation: {e}")
             return False

@@ -4,7 +4,7 @@
 providers:
   # Yahoo Finance - Primary provider for most markets
   yahoo_finance:
-    enabled: true
+    enabled: false
     priority: 1
     description: "Yahoo Finance API for global market data"
     supports:
@@ -18,10 +18,10 @@ providers:
     
   # Tushare - Chinese market specialist
   tushare:
-    enabled: false  # Requires API token
+    enabled: true  # Requires API token
     priority: 2
     description: "Tushare API for Chinese market data"
-    api_token: null  # Set your Tushare token here
+    api_token: a56e2085d63e65ca75096d2b1e014fb7e767abb40fa4a6f9a1416e39
     supports:
       - tick_data: true
       - order_book: true
@@ -33,7 +33,7 @@ providers:
     
   # Synthetic Data - Fallback provider
   synthetic:
-    enabled: true
+    enabled: false
     priority: 99  # Always last fallback
     description: "Synthetic data generator for testing and fallback"
     supports:

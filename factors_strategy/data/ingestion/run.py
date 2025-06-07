@@ -20,6 +20,7 @@ from data.storage.data_writer import DataWriter
 from data.storage.data_reader import DataReader
 from data.ingestion.data_collector import DataCollector
 from data.ingestion.data_preprocessor import DataPreprocessor
+import yaml
 
 # Setup enhanced logging with line numbers and thread ID
 import threading
@@ -33,12 +34,13 @@ logger = logging.getLogger(__name__)
 class DataIngestionPipeline:
     """Main data ingestion pipeline"""
     
-    def __init__(self, config_path: str = "config/database.yaml"):
+    def __init__(self, config_path: str = "config/database.yaml",
+                 data_providers_config: str = "config/data_providers.yaml"):
         """Initialize the ingestion pipeline"""
         self.client = ClickHouseClient(config_path)
         self.writer = DataWriter(self.client)
         self.reader = DataReader(self.client)
-        self.collector = DataCollector()
+        self.collector = DataCollector(data_providers_config)
         self.preprocessor = DataPreprocessor()
         
     async def run_ingestion(self, symbols: List[str],
@@ -58,7 +60,7 @@ class DataIngestionPipeline:
         # Handle "ALL" symbols parameter
         if len(symbols) == 1 and symbols[0].upper() == "ALL":
             logger.info("Fetching all available symbols from database...")
-            symbols = self._get_all_symbols()
+            symbols = await self._get_all_symbols()
             if not symbols:
                 logger.info("No symbols found in database, using default symbol list...")
                 symbols = self._get_default_symbol_list()
@@ -169,19 +171,28 @@ class DataIngestionPipeline:
             logger.error(f"Failed to ingest factors for {symbol}: {e}")
             raise
             
-    def _get_all_symbols(self) -> List[str]:
-        """Get all available symbols from the database"""
+    async def _get_all_symbols(self) -> List[str]:
+        """Get all available symbols from data providers via API"""
         try:
-            # Try to get symbols from existing data
-            symbols = self.reader.get_symbol_universe(active_only=True)
+            # First try to get symbols from data providers (API)
+            logger.info("Fetching available symbols from data providers...")
+            symbols = await self.collector.get_available_symbols()
+            
             if symbols:
-                logger.info(f"Found {len(symbols)} symbols in database")
+                logger.info(f"Found {len(symbols)} symbols from data providers")
                 return symbols
             else:
-                logger.info("No symbols found in database")
-                return []
+                # Fallback to database if no symbols from providers
+                logger.info("No symbols from providers, checking database...")
+                db_symbols = self.reader.get_symbol_universe(active_only=True)
+                if db_symbols:
+                    logger.info(f"Found {len(db_symbols)} symbols in database")
+                    return db_symbols
+                else:
+                    logger.info("No symbols found in database either")
+                    return []
         except Exception as e:
-            logger.warning(f"Failed to get symbols from database: {e}")
+            logger.warning(f"Failed to get symbols: {e}")
             return []
             
     def _get_default_symbol_list(self) -> List[str]:
@@ -257,6 +268,8 @@ def main():
                        help='Types of data to ingest')
     parser.add_argument('--config', default='config/database.yaml',
                        help='Database configuration file')
+    parser.add_argument('--providers-config', default='config/data_providers.yaml',
+                       help='Data providers configuration file')
     
     args = parser.parse_args()
     
@@ -270,7 +283,7 @@ def main():
         end_date = datetime.strptime(args.end_date, '%Y-%m-%d')
         
     # Create and run pipeline
-    pipeline = DataIngestionPipeline(args.config)
+    pipeline = DataIngestionPipeline(args.config, args.providers_config)
     
     try:
         asyncio.run(pipeline.run_ingestion(
