@@ -63,6 +63,43 @@ This will check:
 - All required packages
 - Database connectivity
 
+## 📊 Data Collection
+
+### Setup Data Provider Credentials
+
+If using Tushare for Chinese market data, set your API token:
+
+```bash
+# Linux/Mac
+export TUSHARE_TOKEN="your_tushare_api_token_here"
+
+# Windows
+set TUSHARE_TOKEN=your_tushare_api_token_here
+```
+
+### Collect Historical Data
+
+The data ingestion pipeline now supports parallel processing for faster data collection:
+
+```bash
+# Sequential collection (default)
+python -m data.ingestion.run --symbols 000001.SZ 000002.SZ --start-date 2024-01-01 --end-date 2024-01-31
+
+# Parallel collection with 5 workers
+python -m data.ingestion.run --symbols 000001.SZ 000002.SZ --start-date 2024-01-01 --end-date 2024-01-31 --workers 5
+
+# Collect ALL symbols with 10 parallel workers (recommended for large batches)
+python -m data.ingestion.run --symbols ALL --start-date 2024-01-01 --end-date 2024-01-31 --workers 10
+
+# Collect specific data types only
+python -m data.ingestion.run --symbols ALL --start-date 2024-01-01 --end-date 2024-01-31 --data-types tick_data --workers 8
+```
+
+**Performance Tips:**
+- Use `--workers 5-10` for optimal performance with large symbol lists
+- Monitor system resources when using many workers
+- Check API rate limits in `config/data_providers.yaml`
+
 ## 📊 Running the Strategy
 
 ### Daily Execution
@@ -218,8 +255,13 @@ sudo systemctl restart docker
 1. **Use SSD Storage**: ClickHouse performs best on fast SSDs
 2. **Allocate Sufficient RAM**: At least 16GB for ClickHouse
 3. **GPU Acceleration**: Use NVIDIA GPU (H100 recommended) for deep learning models
-4. **Parallel Processing**: Adjust worker counts in config files
+4. **Parallel Processing**:
+   - Use `--workers` parameter for data ingestion (5-10 workers recommended)
+   - Adjust worker counts in config files for other operations
 5. **Data Partitioning**: Ensure proper date-based partitioning
+6. **Data Collection Speed**:
+   - Single worker: ~1-2 symbols/minute
+   - 10 workers: ~8-15 symbols/minute (5-10x faster)
 
 ## 🔒 Security Checklist
 

@@ -21,7 +21,7 @@ providers:
     enabled: true  # Requires API token
     priority: 2
     description: "Tushare API for Chinese market data"
-    api_token: a56e2085d63e65ca75096d2b1e014fb7e767abb40fa4a6f9a1416e39
+    # api_token: Set TUSHARE_TOKEN environment variable instead of hardcoding here
     supports:
       - tick_data: true
       - order_book: true

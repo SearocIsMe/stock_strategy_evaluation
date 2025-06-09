@@ -11,6 +11,9 @@ import sys
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import List, Optional
+from asyncio import Semaphore
+import time
+import uuid
 
 # Add project root to path
 sys.path.append(str(Path(__file__).parent.parent.parent))
@@ -35,13 +38,16 @@ class DataIngestionPipeline:
     """Main data ingestion pipeline"""
     
     def __init__(self, config_path: str = "config/database.yaml",
-                 data_providers_config: str = "config/data_providers.yaml"):
+                 data_providers_config: str = "config/data_providers.yaml",
+                 max_workers: int = 1):
         """Initialize the ingestion pipeline"""
         self.client = ClickHouseClient(config_path)
         self.writer = DataWriter(self.client)
         self.reader = DataReader(self.client)
         self.collector = DataCollector(data_providers_config)
         self.preprocessor = DataPreprocessor()
+        self.max_workers = max_workers
+        self.semaphore = Semaphore(max_workers)
         
     async def run_ingestion(self, symbols: List[str],
                           start_date: Optional[datetime] = None,
@@ -66,42 +72,100 @@ class DataIngestionPipeline:
                 symbols = self._get_default_symbol_list()
         
         logger.info(f"Starting data ingestion for {len(symbols)} symbols")
+        logger.info(f"Using {self.max_workers} parallel workers")
         logger.info(f"Symbols: {symbols[:10]}{'...' if len(symbols) > 10 else ''}")
         logger.info(f"Date range: {start_date} to {end_date}")
         logger.info(f"Data types: {data_types}")
         
         try:
+            # Process symbols in parallel with controlled concurrency
+            tasks = []
             for symbol in symbols:
-                logger.info(f"Processing symbol: {symbol}")
-                
-                # Collect tick data
-                if 'tick_data' in data_types:
-                    await self._ingest_tick_data(symbol, start_date, end_date)
+                task = self._process_symbol_with_semaphore(symbol, start_date, end_date, data_types)
+                tasks.append(task)
+            
+            # Execute all tasks concurrently
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            
+            # Check for any errors
+            errors = [r for r in results if isinstance(r, Exception)]
+            if errors:
+                logger.error(f"Encountered {len(errors)} errors during ingestion")
+                for error in errors[:5]:  # Show first 5 errors
+                    logger.error(f"Error: {error}")
                     
-                # Collect order book data
-                if 'order_book' in data_types:
-                    await self._ingest_order_book_data(symbol, start_date, end_date)
-                    
-                # Calculate and store factors
-                if 'factors' in data_types:
-                    await self._ingest_factors(symbol, start_date, end_date)
-                    
-            logger.info("Data ingestion completed successfully")
+            successful = len(results) - len(errors)
+            logger.info(f"Data ingestion completed. Successful: {successful}/{len(symbols)}")
             
         except Exception as e:
             logger.error(f"Data ingestion failed: {e}")
             raise
             
-    async def _ingest_tick_data(self, symbol: str, start_date: datetime, end_date: datetime):
+    async def _process_symbol_with_semaphore(self, symbol: str, start_date: datetime,
+                                           end_date: datetime, data_types: List[str]) -> None:
+        """Process a single symbol with semaphore to limit concurrency"""
+        task_id = str(uuid.uuid4())[:8]
+        start_time = time.time()
+        
+        logger.info(f"[Task {task_id}] Waiting for semaphore to process {symbol}...")
+        async with self.semaphore:
+            acquired_time = time.time()
+            wait_time = acquired_time - start_time
+            logger.info(f"[Task {task_id}] Acquired semaphore for {symbol} after {wait_time:.2f}s wait")
+            
+            await self._process_symbol(symbol, start_date, end_date, data_types, task_id)
+            
+            elapsed_time = time.time() - acquired_time
+            logger.info(f"[Task {task_id}] Released semaphore for {symbol} after {elapsed_time:.2f}s processing")
+            
+    async def _process_symbol(self, symbol: str, start_date: datetime,
+                            end_date: datetime, data_types: List[str], task_id: str = None) -> None:
+        """Process all data types for a single symbol"""
+        if task_id is None:
+            task_id = "MAIN"
+            
+        try:
+            logger.info(f"[Task {task_id}] Starting to process symbol: {symbol}")
+            process_start = time.time()
+            
+            # Collect tick data
+            if 'tick_data' in data_types:
+                tick_start = time.time()
+                await self._ingest_tick_data(symbol, start_date, end_date, task_id)
+                tick_elapsed = time.time() - tick_start
+                logger.info(f"[Task {task_id}] Tick data collection for {symbol} took {tick_elapsed:.2f}s")
+                
+            # Collect order book data
+            if 'order_book' in data_types:
+                order_start = time.time()
+                await self._ingest_order_book_data(symbol, start_date, end_date, task_id)
+                order_elapsed = time.time() - order_start
+                logger.info(f"[Task {task_id}] Order book collection for {symbol} took {order_elapsed:.2f}s")
+                
+            # Calculate and store factors
+            if 'factors' in data_types:
+                factor_start = time.time()
+                await self._ingest_factors(symbol, start_date, end_date, task_id)
+                factor_elapsed = time.time() - factor_start
+                logger.info(f"[Task {task_id}] Factor calculation for {symbol} took {factor_elapsed:.2f}s")
+                
+            total_elapsed = time.time() - process_start
+            logger.info(f"[Task {task_id}] Completed processing symbol {symbol} in {total_elapsed:.2f}s")
+            
+        except Exception as e:
+            logger.error(f"[Task {task_id}] Failed to process symbol {symbol}: {e}")
+            raise
+            
+    async def _ingest_tick_data(self, symbol: str, start_date: datetime, end_date: datetime, task_id: str = "MAIN"):
         """Ingest tick data for a symbol"""
         try:
-            logger.info(f"Collecting tick data for {symbol}")
+            logger.info(f"[Task {task_id}] Collecting tick data for {symbol}")
             
             # Collect raw tick data
             raw_data = await self.collector.collect_tick_data(symbol, start_date, end_date)
             
-            if raw_data.empty: 
-                logger.warning(f"No tick data found for {symbol}")
+            if raw_data.empty:
+                logger.warning(f"[Task {task_id}] No tick data found for {symbol}")
                 return
                 
             # Preprocess the data
@@ -110,22 +174,22 @@ class DataIngestionPipeline:
             # Write to database
             self.writer.write_tick_data(processed_data)
             
-            logger.info(f"Ingested {len(processed_data)} tick records for {symbol}")
+            logger.info(f"[Task {task_id}] Ingested {len(processed_data)} tick records for {symbol}")
             
         except Exception as e:
-            logger.error(f"Failed to ingest tick data for {symbol}: {e}")
+            logger.error(f"[Task {task_id}] Failed to ingest tick data for {symbol}: {e}")
             raise
             
-    async def _ingest_order_book_data(self, symbol: str, start_date: datetime, end_date: datetime):
+    async def _ingest_order_book_data(self, symbol: str, start_date: datetime, end_date: datetime, task_id: str = "MAIN"):
         """Ingest order book data for a symbol"""
         try:
-            logger.info(f"Collecting order book data for {symbol}")
+            logger.info(f"[Task {task_id}] Collecting order book data for {symbol}")
             
             # Collect raw order book data
             raw_data = await self.collector.collect_order_book_data(symbol, start_date, end_date)
             
             if raw_data.empty:
-                logger.warning(f"No order book data found for {symbol}")
+                logger.warning(f"[Task {task_id}] No order book data found for {symbol}")
                 return
                 
             # Preprocess the data
@@ -134,16 +198,16 @@ class DataIngestionPipeline:
             # Write to database
             self.writer.write_order_book(processed_data)
             
-            logger.info(f"Ingested {len(processed_data)} order book records for {symbol}")
+            logger.info(f"[Task {task_id}] Ingested {len(processed_data)} order book records for {symbol}")
             
         except Exception as e:
-            logger.error(f"Failed to ingest order book data for {symbol}: {e}")
+            logger.error(f"[Task {task_id}] Failed to ingest order book data for {symbol}: {e}")
             raise
             
-    async def _ingest_factors(self, symbol: str, start_date: datetime, end_date: datetime):
+    async def _ingest_factors(self, symbol: str, start_date: datetime, end_date: datetime, task_id: str = "MAIN"):
         """Calculate and ingest factors for a symbol"""
         try:
-            logger.info(f"Calculating factors for {symbol}")
+            logger.info(f"[Task {task_id}] Calculating factors for {symbol}")
             
             # Get tick data for factor calculation
             from data.storage.data_reader import DataReader
@@ -152,23 +216,23 @@ class DataIngestionPipeline:
             tick_data = reader.get_tick_data([symbol], start_date, end_date)
             
             if tick_data.empty:
-                logger.warning(f"No tick data available for factor calculation: {symbol}")
+                logger.warning(f"[Task {task_id}] No tick data available for factor calculation: {symbol}")
                 return
                 
             # Calculate factors
             factors = self.preprocessor.calculate_factors(tick_data, symbol)
             
             if factors.empty:
-                logger.warning(f"No factors calculated for {symbol}")
+                logger.warning(f"[Task {task_id}] No factors calculated for {symbol}")
                 return
                 
             # Write factors to database
             self.writer.write_factors(factors)
             
-            logger.info(f"Ingested {len(factors)} factor records for {symbol}")
+            logger.info(f"[Task {task_id}] Ingested {len(factors)} factor records for {symbol}")
             
         except Exception as e:
-            logger.error(f"Failed to ingest factors for {symbol}: {e}")
+            logger.error(f"[Task {task_id}] Failed to ingest factors for {symbol}: {e}")
             raise
             
     async def _get_all_symbols(self) -> List[str]:
@@ -262,7 +326,7 @@ def main():
                        help='Stock symbols to ingest. Use "ALL" to ingest all available symbols from database or default comprehensive list')
     parser.add_argument('--start-date', type=str, help='Start date (YYYY-MM-DD)')
     parser.add_argument('--end-date', type=str, help='End date (YYYY-MM-DD)')
-    parser.add_argument('--data-types', nargs='+', 
+    parser.add_argument('--data-types', nargs='+',
                        choices=['tick_data', 'order_book', 'factors'],
                        default=['tick_data', 'order_book', 'factors'],
                        help='Types of data to ingest')
@@ -270,6 +334,8 @@ def main():
                        help='Database configuration file')
     parser.add_argument('--providers-config', default='config/data_providers.yaml',
                        help='Data providers configuration file')
+    parser.add_argument('--workers', type=int, default=1,
+                       help='Number of parallel workers for data collection (default: 1)')
     
     args = parser.parse_args()
     
@@ -283,7 +349,7 @@ def main():
         end_date = datetime.strptime(args.end_date, '%Y-%m-%d')
         
     # Create and run pipeline
-    pipeline = DataIngestionPipeline(args.config, args.providers_config)
+    pipeline = DataIngestionPipeline(args.config, args.providers_config, max_workers=args.workers)
     
     try:
         asyncio.run(pipeline.run_ingestion(
