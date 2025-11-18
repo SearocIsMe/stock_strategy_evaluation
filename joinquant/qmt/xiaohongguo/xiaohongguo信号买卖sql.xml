@@ -2,7 +2,7 @@
 <TCStageLayout>
     <control note="控件">
         <variable note="控件">
-            <item position="" bind="name" value="49.234.12.146" note="服务器地址" name="服务器地址" type="intput"/>
+            <item position="" bind="name" value="8.138.38.43" note="服务器地址" name="服务器地址" type="intput"/>
             <item position="" bind="pws" value="Fyyunfei336..." note="数据库密码" name="数据库密码" type="intput"/>
             <item position="" bind="start_time" value="093000" note="开始时间" name="开始时间" type="intput"/>
             <item position="" bind="end_time" value="153000" note="结束时间" name="结束时间" type="intput"/>
