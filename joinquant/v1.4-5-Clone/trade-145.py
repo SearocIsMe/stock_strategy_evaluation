@@ -166,7 +166,13 @@ def get_stock_list(context):
                 final_list.append(stock)
     return final_list
 
-#1-3 整体调整持仓
+# 更进一步的优化版本
+def safe_get_position(context, stock):
+    """安全获取持仓信息"""
+    if stock in context.portfolio.positions:
+        return context.portfolio.positions[stock]
+    else:
+        return None
 def weekly_adjustment(context):
     if g.no_trading_today_signal == False:
         #获取应买入列表
@@ -176,8 +182,11 @@ def weekly_adjustment(context):
         for stock in g.hold_list:
             if (stock not in target_list) and (stock not in g.yesterday_HL_list):
                 log.info("卖出[%s]" % (stock))
-                position = context.portfolio.positions[stock]
-                close_position(position)
+                position = safe_get_position(context, stock)
+                if position:
+                    close_position(position)
+                else:
+                    log.info("股票[%s]已不在持仓中" % (stock))
             else:
                 log.info("已持有[%s]" % (stock))
         #调仓买入
@@ -185,14 +194,15 @@ def weekly_adjustment(context):
         
         if position_count < 1:
             log.info("position_count = 0")
-
         target_num = len(target_list)
-        if target_num > position_count:
+        if target_num > position_count and context.portfolio.cash > 0:
             value = context.portfolio.cash / (target_num - position_count)
             for stock in target_list:
-                if context.portfolio.positions[stock].total_amount == 0:
+                position = safe_get_position(context, stock)
+                if not position or position.total_amount == 0:
                     if open_position(stock, value):
-                        if len(context.portfolio.positions) == target_num:
+                        # 重新计算持仓数量
+                        if len(context.portfolio.positions) >= target_num:
                             break
 
 
@@ -202,16 +212,18 @@ def check_limit_up(context):
     if g.yesterday_HL_list != []:
         #对昨日涨停股票观察到尾盘如不涨停则提前卖出，如果涨停即使不在应买入列表仍暂时持有
         for stock in g.yesterday_HL_list:
+            # 修复bug：检查股票是否仍在持仓中
+            if stock not in context.portfolio.positions:
+                continue
             current_data = get_price(stock, end_date=now_time, frequency='1m', fields=['close','high_limit'], skip_paused=False, fq='pre', count=1, panel=False, fill_paused=True)
-            if current_data.iloc[0,0] <    current_data.iloc[0,1]:
+            if current_data.iloc[0,0] < current_data.iloc[0,1]:
                 log.info("[%s]涨停打开，卖出" % (stock))
                 position = context.portfolio.positions[stock]
                 close_position(position)
             else:
                 log.info("[%s]涨停，继续持有" % (stock))
-
-
-
+                
+                
 #2-1 过滤停牌股票
 def filter_paused_stock(stock_list):
     current_data = get_current_data()
@@ -293,9 +305,11 @@ def close_account(context):
     if g.no_trading_today_signal == True:
         if len(g.hold_list) != 0:
             for stock in g.hold_list:
-                position = context.portfolio.positions[stock]
-                close_position(position)
-                log.info("卖出[%s]" % (stock))
+                # 修复bug：检查股票是否在持仓中
+                if stock in context.portfolio.positions:
+                    position = context.portfolio.positions[stock]
+                    close_position(position)
+                    log.info("卖出[%s]" % (stock))
 
 #4-3 打印每日持仓信息
 def print_position_info(context):
