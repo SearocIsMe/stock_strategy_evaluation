@@ -5,7 +5,7 @@ import datetime
 import traceback
 
 # ====== 基本配置：资金账号 & 账号类型（建议后续改成策略参数） ======
-ACCOUNT_ID   = '8884182789'   # 你的资金账号
+ACCOUNT_ID   = 'sf'   # 你的资金账号
 ACCOUNT_TYPE = 'stock'        # 文档示例里用的是小写 'stock'
 
 

@@ -16,7 +16,7 @@ class MyTrade():
     
     def __init__(self): 
         
-        self.conn = pymssql.connect('8.138.38.43', 'sa', 'Just4Jhp@QmtJoinQuant3333', 'touzi')  # 建立连接
+        self.conn = pymssql.connect('8.sf.38.43', 'sf', 'sf@sf', 'touzi')  # 建立连接
 
         
     def update(self, code, quantity, types):
