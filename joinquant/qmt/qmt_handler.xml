@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="utf-8"?>
+<TCStageLayout>
+    <control note="控件">
+        <variable note="控件">
+
+            <!-- ===== MSSQL 连接参数 ===== -->
+            <item position="" bind="MSSQL_SERVER"
+                  value="8.138.38.43"
+                  note="MSSQL 服务器地址（IP 或域名）"
+                  name="数据库服务器地址"
+                  type="intput"/>
+
+            <item position="" bind="MSSQL_PORT"
+                  value="1433"
+                  note="MSSQL 端口号"
+                  name="数据库端口"
+                  type="intput"/>
+
+            <item position="" bind="MSSQL_USER"
+                  value="sa"
+                  note="MSSQL 登录用户名"
+                  name="数据库用户名"
+                  type="intput"/>
+
+            <item position="" bind="MSSQL_PWD"
+                  value="Just4Jhp@QmtJoinQuant"
+                  note="MSSQL 登录密码"
+                  name="数据库密码"
+                  type="intput"/>
+
+            <item position="" bind="MSSQL_DB"
+                  value="touzi"
+                  note="数据库名称"
+                  name="数据库名称"
+                  type="intput"/>
+
+            <item position="" bind="MSSQL_TABLE"
+                  value="trade"
+                  note="存放信号的表名"
+                  name="表名"
+                  type="intput"/>
+
+            <!-- ===== 策略过滤 / 分类 ===== -->
+            <item position="" bind="FENLEI"
+                  value="小红果"
+                  note="trade.fenlei 的过滤值，只处理该分类的信号"
+                  name="策略分类"
+                  type="intput"/>
+
+            <!-- ===== 交易账号相关 ===== -->
+            <item position="" bind="ACCOUNT_ID"
+                  value="6000000248"
+                  note="QMT 中实际可交易的资金账号 ID"
+                  name="资金账号"
+                  type="intput"/>
+
+            <!-- ===== 运行行为参数 ===== -->
+            <item position="" bind="MAX_ORDERS_PER_LOOP"
+                  value="20"
+                  note="每次轮询最多处理的信号条数，防止一次抓太多"
+                  name="每轮最大处理条数"
+                  type="intput"/>
+
+            <item position="" bind="POLL_INTERVAL_SEC"
+                  value="1"
+                  note="轮询数据库的时间间隔（秒），tick 很频繁时可适当加大"
+                  name="轮询间隔(秒)"
+                  type="intput"/>
+
+        </variable>
+    </control>
+</TCStageLayout>
