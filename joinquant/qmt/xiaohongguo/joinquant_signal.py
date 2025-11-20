@@ -56,7 +56,7 @@ def initialize(context):
     g.stoploss_market = 0.05  # 市场趋势止损参数
     g.etf = '511880.XSHG'  # 空仓月份持有银华日利ETF
     # 设置交易运行时间
-    run_daily(prepare_stock_list, '12:30')
+    run_daily(prepare_stock_list, '09:05')
     run_daily(trade_afternoon, time='14:00', reference_security='399101.XSHE') #检查持仓中的涨停股是否需要卖出
     run_daily(sell_stocks, time='10:00') # 止损函数
     run_daily(close_account, '14:50')
