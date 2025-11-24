@@ -1,0 +1,14 @@
+<service>
+  <id>TradeApiService</id>
+  <name>Trade API Service</name>
+  <description>FastAPI REST API for JoinQuant trading logging</description>
+
+  <executable>C:\trade_api\venv\Scripts\python.exe</executable>
+  <arguments>-m uvicorn server:app --host 127.0.0.1 --port 8000</arguments>
+  <workingdirectory>C:\trade_api</workingdirectory>
+
+  <onfailure action="restart" delay="5 sec"/>
+
+  <logpath>C:\trade_api\logs</logpath>
+  <log mode="append"></log>
+</service>
