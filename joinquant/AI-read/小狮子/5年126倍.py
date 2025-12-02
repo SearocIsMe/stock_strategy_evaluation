@@ -19,7 +19,17 @@ from jqfactor import *
 import numpy as np
 import pandas as pd
 from datetime import time
+import newqmt_sql
 
+# ⭐ 在这里设置这个策略的分类标签（写入 trade.fenlei）
+newqmt_sql.FENLEI = '5years'      
+
+from newqmt_sql import (
+    order_zzy as order,
+    order_target_zzy as order_target,
+    order_value_zzy as order_value,
+    order_target_value_zzy as order_target_value
+)
 
 #初始化函数 
 def initialize(context):
@@ -57,7 +67,7 @@ def initialize(context):
     g.not_buy_again = []
     #全局变量
     g.stock_num = 3
-    g.up_price = 20  # 设置股票单价 
+    g.up_price = 200  # 设置股票单价 
     g.limit_days_window = 3 * 250 # 历史涨停的参考窗口期
     g.init_stock_count = 1000 # 初始股池的数量
     g.reason_to_sell = ''
@@ -517,18 +527,6 @@ def buy_security(context,target_list,cash=0,buy_number=0):
                         bought_num += 1
                         if len(context.portfolio.positions) == target_num:
                             break
-    # else:
-    #     value = cash / target_num
-    #     for stock in target_list:
-    #         if context.portfolio.positions[stock].total_amount == 0:
-    #             if bought_num < buy_number:
-    #                 if open_position(stock, value):
-    #                     log.info("买入[%s]（%s元）" % (stock,value))
-    #                     g.not_buy_again.append(stock) #持仓清单，后续不希望再买入
-    #                     bought_num += 1
-    #                     if len(context.portfolio.positions) == target_num:
-    #                         break
-
 
 
 

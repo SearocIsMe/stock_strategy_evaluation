@@ -64,12 +64,12 @@ from jqfactor import *
 from prettytable import PrettyTable
 
 
-import myqmt_sql
+import newqmt_sql
 
 # ⭐ 在这里设置这个策略的分类标签（写入 trade.fenlei）
-myqmt_sql.FENLEI = 'simple162'      
+newqmt_sql.FENLEI = 'simple162'      
 
-from myqmt_sql import (
+from newqmt_sql import (
     order_zzy as order,
     order_target_zzy as order_target,
     order_value_zzy as order_value,
@@ -111,7 +111,7 @@ def set_params(context):
     3. ETF反弹核心标的在23.9月才上市, 回测过去周期策略失效
     4. 本策略预设的研究周期设计为 长:18-25, 中20-25, 短24-25, 早于18的 15/17 极端行情暂不做考虑
     """
-    # g.portfolio_value_proportion = [0.35, 0.1, 0.35, 0.2]  # 小市值/ETF反弹/ETF轮动/白马攻防 (实盘)
+    # g.portfolio_value_proportion = [0.4, 0.3, 0, 0.3]  # 小市值/ETF反弹/ETF轮动/白马攻防 (实盘)
     # g.portfolio_value_proportion = [0.4, 0.2, 0.4, 0]  # 小市值/ETF反弹/ETF轮动 (实盘/短回测)
     g.portfolio_value_proportion = [0.5, 0, 0.5, 0]  # 小市值/ETF轮动 (用于长回测)
     # g.portfolio_value_proportion = [0.35, 0, 0.35, 0.3]  # 小市值/ETF轮动/白马 (用于长回测)
@@ -151,7 +151,7 @@ def set_strategy_params(context):
     g.huanshou_check = False  # 放量换手检测，Ture是日频判断是否放量，False则不然
     g.xsz_version = "v3"  # 市值选用版本 可选值: v1/v2/v3 具体逻辑自己看代码吧, 写不下
     g.enable_dynamic_stock_num = True  # 启用动态选股数量 3~6
-    g.xsz_stock_num = 5  # 默认的持股数量, 启用动态后会被覆盖为 3~6
+    g.xsz_stock_num = 3  # 默认的持股数量, 启用动态后会被覆盖为 3~6
     g.yesterday_HL_list = []  # 昨日涨停股票
     g.target_list = []  # 目标持仓股票
     g.xsz_buy_etf = "512800.XSHG"  # 空仓时购买ETF
@@ -239,7 +239,7 @@ def set_strategy_params(context):
     """ 策略4 白马攻防 参数 """
     g.check_out_lists = []
     g.market_temperature = "warm"
-    g.stock_num_2 = 5  # 目标持股数量
+    g.stock_num_2 = 2  # 目标持股数量
     g.roe = 10  # ROE权重
     g.roa = 6  # ROA权重
 
@@ -295,16 +295,18 @@ def xsz_get_stock_list_v1(context):
     initial_list = filter_st_stock(initial_list)
 
     # 选取每股收益>0的股票
-    # q = query(valuation.code, indicator.eps) \
-    #     .filter(valuation.code.in_(initial_list)) \
-    #     .filter(indicator.eps > 0) \
-    #     .filter(valuation.market_cap > g.min_mv) \
-    #     .filter(valuation.market_cap < g.max_mv) \
-    #     .order_by(valuation.market_cap.asc())
+    q = query(valuation.code, indicator.eps) \
+         .filter(valuation.code.in_(initial_list)) \
+         .filter(indicator.eps > 0) \
+         .filter(valuation.market_cap > g.min_mv) \
+         .filter(valuation.market_cap < g.max_mv) \
+         .order_by(valuation.market_cap.asc())
+    
+    print('选取每股收益>0的股票')
 
     q = query(valuation.code).filter(valuation.code.in_(initial_list)).order_by(valuation.market_cap.asc())
     initial_list = list(get_fundamentals(q).code)
-    initial_list = initial_list[:30]
+    initial_list = initial_list[:50]
     # 每个行业获取1个股票，总共获取g.stock_num个行业的股票
     final_list = filter_industry_stock(initial_list)[:g.xsz_stock_num]
     print('选出的股票:%s' % [f"{i} {get_security_info(i).display_name}" for i in final_list])
@@ -450,17 +452,6 @@ def strategy_1_sell(context):
         sell_list and print("计划卖出 %s" % ([format_stock_code(stock) for stock in sell_list]))
     for stock in sell_list:
         close_position(stock)
-
-    # current_data = get_current_data()
-    # for stock in sell_list:
-    #     current_stock_data = current_data[stock]
-    #     if current_stock_data.paused:
-    #         print(f"⭕ {stock} 停牌, 无法卖出")
-    #     elif current_stock_data.last_price > current_stock_data.high_limit * 0.99:  # 涨幅超过 9.9% 涨停未打开
-    #         print(f"⭕ {stock} 涨停, 不进行卖出")
-    #     else:
-    #         close_position(stock)
-
 
 # 小市值买入
 def strategy_1_buy(context):
@@ -649,8 +640,6 @@ def strategy_2_buy(context):
 
 
 """ ====================== 策略3: ETF轮动 ====================== """
-
-
 # 动量计算
 def filter_moment_rank(stock_pool, days, ll, hh, show_print=True):
     print("计算 动量得分" + "*" * 60)
@@ -922,6 +911,8 @@ def strategy_3_buy(context):
 
 
 """ ====================== 策略4: 白马攻防 ====================== """
+
+
 def bm_adjust_position(context):
     if not g.check_out_lists:
         bm_before_market_open(context)
@@ -1917,7 +1908,7 @@ def after_code_changed(context):
         if g.DBL_control:
             run_daily(check_dbl, '9:31')  # 不要早于9点30, 否则会导致绘制的收益曲线无法拿到价格信息
         run_weekly(strategy_1_sell, 2, '09:40')
-        run_weekly(strategy_1_buy, 2, '09:40:02')
+        run_weekly(strategy_1_buy, 2, '09:40:20')
         run_daily(xsz_sell_stocks, time='10:00')  # 止损函数
         # 换手检查
         if g.huanshou_check:
@@ -1933,13 +1924,13 @@ def after_code_changed(context):
     # 策略2 ETF反弹策略
     if g.strategy_ETF_2000_proportion > 0:
         run_daily(capital_balance_2, '14:45')  # 基于 2023.9.28 进行资金再平衡
-        run_daily(strategy_2_sell, '14:49')
+        run_daily(strategy_2_sell, '14:48')
         run_daily(strategy_2_buy, '14:50')
 
     # 策略3 ETF轮动策略
     if g.portfolio_value_proportion[2] > 0:
         run_daily(strategy_3_sell, '10:35:00')
-        run_daily(strategy_3_buy, '10:35:05')
+        run_daily(strategy_3_buy, '10:35:25')
         if g.enable_stop_loss_by_cur_day:
             run_daily(etf_stop_loss_by_cur_day, '10:01')  # 日内亏损检测
             run_daily(etf_stop_loss_by_cur_day, '10:31')  # 日内亏损检测
@@ -1947,7 +1938,6 @@ def after_code_changed(context):
     # 策略4 白马策略
     if g.portfolio_value_proportion[3] > 0:
         run_monthly(bm_before_market_open, 1, time='8:00')
-        # run_daily(bm_before_market_open, time='15:10')
         run_monthly(bm_adjust_position, 1, time='10:40')
 
     # 记录各策略每日收益
