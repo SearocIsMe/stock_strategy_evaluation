@@ -20,7 +20,7 @@
 # |---|---|---|
 # | 自选时间 | 涨停日 | 定义为该股涨停的日期 |
 # | 自选价格 | 涨停日收盘价 | 涨停当日的收盘价 |
-# | 自选收益 | 相对涨停日收益 | (现价-涨停价)/涨停价 |
+# | 自选收益 | 相对涨停日收益 | (现价-涨停价)/涨停价 |a
 # | 连涨天数 | 连板/趋势强度 | 连续涨停天数参考 |
 # | 昨日涨幅% | 是否涨停判断 | >=9.8% 视为涨停 |
 # 
@@ -111,6 +111,70 @@ print(f'  防守线: {CONFIG["defense_line"]:.1%}')
 print(f'  涨停阈值: {CONFIG["zt_threshold"]}%')
 print(f'  N日范围: {CONFIG["N_days"]}')
 print(f'  Top K: {CONFIG["top_k"]}')
+
+
+# ============================================================================
+# 因子中文名映射
+# ============================================================================
+FACTOR_NAME_CN = {
+    'factor_return_3d': '3日收益',
+    'factor_return_5d': '5日收益',
+    'factor_max_return': '最大涨幅',
+    'factor_defense_ratio': '防守线满足比',
+    'factor_above_zt_ratio': '高于涨停价比',
+    'factor_ma5_position': 'MA5位置',
+    'factor_bias_ma5': 'MA5乖离率',
+    'factor_consecutive_up': '连涨天数',
+    'factor_pct_3d': '3日涨幅',
+    'factor_pct_5d': '5日涨幅',
+    'factor_vol_ratio': '量比',
+    'factor_turnover': '换手率',
+    'factor_inner_outer': '内外盘比',
+    'factor_vol_price': '量价配合',
+    'factor_main_net_inflow': '主力净流入',
+    'factor_main_net_pct': '主力净比',
+    'factor_main_net_3d': '3日主力净流入',
+    'factor_pe': '市盈率',
+    'factor_roe': 'ROE',
+    'factor_profit_yoy': '净利润同比',
+    'factor_gross_margin': '毛利率',
+    'factor_max_drawdown': '最大回撤',
+    'factor_zt_open_count': '开板次数',
+    'factor_amplitude': '振幅',
+    'factor_seal_amount': '封单金额',
+    'factor_seal_ratio': '封单比例',
+    'factor_days_boards': '连板数',
+}
+
+# ============================================================================
+# 列名中文映射（用于表格输出表头中文化）
+# ============================================================================
+COLUMN_NAME_CN = {
+    # 基本信息
+    'code': '代码', 'name': '名称', 'zt_date': '涨停日', 'zt_close': '涨停价',
+    'pct_change': '涨幅%', 'price_change': '涨跌', 'latest_price': '最新价',
+    # 收益
+    'return_n1': '1日收益', 'return_n2': '2日收益', 'return_n3': '3日收益',
+    'return_n4': '4日收益', 'return_n5': '5日收益',
+    'total_score': '总评分',
+    # 因子相关性表
+    '因子中文名': '因子中文名',
+    # 因子有效性表
+    'factor': '因子(英文)', 'factor_cn': '因子中文名',
+    'avg_abs_IC': '平均|IC|', 'avg_abs_pearson': '平均|Pearson|',
+    'effectiveness': '有效性', 'recommendation': '建议',
+    # 行情指标
+    'turnover_rate': '换手率', 'vol_ratio': '量比',
+    'main_net_inflow': '主力净流入', 'consecutive_up': '连涨天数',
+    'ratio_above_zt': '高于涨停价比', 'ratio_above_defense': '高于防守线比',
+    # 分类/信号
+    'classification': '分类', 'trade_signal': '交易信号',
+    # 预测
+    'entry_index': '建仓指数', 'prediction': '预测', 'signal': '信号',
+    'buy_price': '建议买入价', 'stop_loss': '止损价', 'target_price': '目标价',
+}
+
+print('因子中文名映射 & 列名中文映射已加载')
 
 
 # ## 3. 字段映射定义
@@ -324,6 +388,9 @@ print('✅ read_data() 已定义')
 
 def _convert_pct_to_float(series):
     """将百分比字符串（如 '9.8%'）转为 float（如 9.8）"""
+    # 兼容 pandas 0.23：重复列名时 df[col] 返回 DataFrame
+    if isinstance(series, pd.DataFrame):
+        series = series.iloc[:, 0]
     if series.dtype == object:
         series = series.astype(str).str.replace('%', '', regex=False)
         series = pd.to_numeric(series, errors='coerce')
@@ -358,6 +425,9 @@ def _convert_chinese_number(val):
 
 def _convert_chinese_number_series(series):
     """对整列应用 _convert_chinese_number"""
+    # 兼容 pandas 0.23：重复列名时 df[col] 返回 DataFrame
+    if isinstance(series, pd.DataFrame):
+        series = series.iloc[:, 0]
     return series.apply(_convert_chinese_number)
 
 
@@ -380,6 +450,51 @@ def _parse_days_boards(val):
     if '首板' in s:
         return 1
     return np.nan
+
+
+def _safe_series(df, col):
+    """
+    安全地从 DataFrame 获取一列作为 Series。
+    处理重复列名导致 df[col] 返回 DataFrame 的情况。
+    若列不存在，返回全 NaN 的 Series。
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+    col : str
+        列名
+
+    Returns
+    -------
+    pd.Series
+    """
+    if col not in df.columns:
+        return pd.Series(np.nan, index=df.index)
+    s = df[col]
+    if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
+    return s
+
+
+def _safe_get(df, col, default=np.nan):
+    """
+    类似 df.get(col, default)，但处理重复列名。
+    列不存在时返回 default，存在时返回首个 Series。
+    """
+    if col not in df.columns:
+        return default
+    s = df[col]
+    if isinstance(s, pd.DataFrame):
+        s = s.iloc[:, 0]
+    return s
+
+
+def _dedup_columns(df):
+    """
+    去除重复列名，保留首次出现的列。
+    FIELD_MAP 多对一映射会产生重复列名，导致 df[col] 返回 DataFrame。
+    """
+    return df.loc[:, ~df.columns.duplicated()]
 
 
 def _normalize_jq_code(code_str):
@@ -449,11 +564,20 @@ def clean_data(raw_df, filter_st=True, filter_yizhi=True):
         # 去除无效日期
         df = df.dropna(subset=['zt_date'])
 
-    # ---- 2.3 删除重复列（pandas 对重复列名自动添加 .1 后缀） ----
+    # ---- 2.3 删除重复列 ----
+    # FIELD_MAP 多对一映射（如 '人均持股数' 和 '人均持股数(最新公告)' → 'shares_per_person'）
+    # 以及 CSV 原始重复列名（pandas 自动添加 .1 后缀）都会产生重复列名。
+    # 重复列名导致 df[col] 返回 DataFrame 而非 Series，在 pandas 0.23 中引发 TypeError。
     dup_cols = [c for c in df.columns if c.endswith('_dup')]
     if dup_cols:
         df = df.drop(columns=dup_cols)
-        print(f"[clean_data] 删除 {len(dup_cols)} 个重复列: {dup_cols}")
+        print(f"[clean_data] 删除 _dup 后缀列: {dup_cols}")
+    # 去除所有重复列名（保留首次出现），这是解决 df[col] 返回 DataFrame 的根本方法
+    n_before = len(df.columns)
+    df = _dedup_columns(df)
+    n_after = len(df.columns)
+    if n_before != n_after:
+        print(f"[clean_data] 去除重复列名: {n_before} → {n_after} 列")
 
     # ---- 2.4 百分比字段转 float ----
     pct_fields = [
@@ -509,11 +633,12 @@ def clean_data(raw_df, filter_st=True, filter_yizhi=True):
 
     for field in plain_numeric_fields:
         if field in df.columns:
-            df[field] = pd.to_numeric(df[field], errors='coerce')
+            s = _safe_series(df, field)
+            df[field] = pd.to_numeric(s, errors='coerce')
 
     # ---- 2.6 解析"几天几板"字段 ----
     if 'days_boards' in df.columns:
-        df['days_boards'] = df['days_boards'].apply(_parse_days_boards)
+        df['days_boards'] = _safe_series(df, 'days_boards').apply(_parse_days_boards)
 
     # ---- 2.7 股票代码标准化为 JQ 格式 ----
     if 'code' in df.columns:
@@ -584,11 +709,11 @@ def _simulate_price_data(df, n_days):
     """当 JQ 不可用时，生成模拟数据用于测试"""
     print("[get_price_data] 生成模拟行情数据...")
 
-    zt_close = df['zt_close'] if 'zt_close' in df.columns else pd.Series([10.0] * len(df))
+    zt_close = _safe_series(df, 'zt_close') if 'zt_close' in df.columns else pd.Series([10.0] * len(df))
 
     for n in CONFIG['N_days']:
         # 模拟 N 日收益率（小数形式，如 0.02 表示 2%）
-        base_pct = df['pct_change'] if 'pct_change' in df.columns else pd.Series([0.0] * len(df))
+        base_pct = _safe_series(df, 'pct_change') if 'pct_change' in df.columns else pd.Series([0.0] * len(df))
         # pct_change 是百分比形式（如 2.5 表示 2.5%），转为小数
         base_return = base_pct / 100.0
         df[f'return_n{n}'] = base_return * np.random.uniform(0.5, 1.5, len(df)) * (n / 3.0)
@@ -597,7 +722,7 @@ def _simulate_price_data(df, n_days):
         df[f'close_n{n}'] = zt_close * (1 + df[f'return_n{n}'])
         df[f'high_n{n}'] = zt_close * (1 + df[f'max_return_n{n}'])
         df[f'low_n{n}'] = zt_close * (1 + df[f'max_drawdown_n{n}'])
-        vol_base = df['volume'] if 'volume' in df.columns else pd.Series([1e6] * len(df))
+        vol_base = _safe_series(df, 'volume') if 'volume' in df.columns else pd.Series([1e6] * len(df))
         df[f'volume_n{n}'] = vol_base * np.random.uniform(0.5, 1.5, len(df))
 
     df['ma5'] = zt_close * np.random.uniform(0.95, 1.05, len(df))
@@ -659,6 +784,105 @@ def _normalize_price_df_time(price_df):
         pass
     
     return price_df
+
+
+def _fill_missing_returns(df):
+    """
+    用 CSV 已有数据补充仍为 NaN 的 return_n1~n5。
+    
+    当涨停日太近（如今天/昨天），JQ API 无法获取足够的后续行情，
+    此时用 CSV 中的 涨幅%/自选收益/最新价 等字段估算 N 日收益。
+    
+    估算优先级（从最准确到最粗略）：
+    1. 直接用对应天数的涨幅字段：pct_3d→return_n3, pct_5d→return_n5
+    2. 用相邻天数涨幅线性插值：pct_3d→return_n1/n2, pct_5d→return_n4
+    3. 用 zt_return（自选收益）或 latest_price/zt_close 按比例缩放
+       （这是到"最新"的总收益，需按 n/max_n 比例估算）
+    """
+    filled_count = 0
+    max_n = max(CONFIG['N_days'])  # 用于按比例缩放总收益
+    
+    for n in CONFIG['N_days']:
+        col = f'return_n{n}'
+        if col not in df.columns:
+            continue
+        
+        na_mask = df[col].isna()
+        if not na_mask.any():
+            continue
+        
+        for idx in df.index[na_mask]:
+            row = df.loc[idx]
+            val = np.nan
+            
+            # ---- 方法1: 直接用对应天数的涨幅字段（最准确）----
+            if n == 3:
+                p3 = row.get('pct_3d', np.nan)
+                if not pd.isna(p3):
+                    val = p3 / 100.0
+            elif n == 5:
+                p5 = row.get('pct_5d', np.nan)
+                if not pd.isna(p5):
+                    val = p5 / 100.0
+                else:
+                    # 退而求其次：用6日涨幅 * (5/6)
+                    p6 = row.get('pct_6d', np.nan)
+                    if not pd.isna(p6):
+                        val = p6 / 100.0 * (5.0 / 6.0)
+            
+            # ---- 方法2: 用相邻天数涨幅线性插值 ----
+            if pd.isna(val):
+                if n == 1:
+                    # 用 pct_3d 的 1/3 估算
+                    p3 = row.get('pct_3d', np.nan)
+                    if not pd.isna(p3):
+                        val = p3 / 100.0 * (1.0 / 3.0)
+                elif n == 2:
+                    # 用 pct_3d 的 2/3 估算
+                    p3 = row.get('pct_3d', np.nan)
+                    if not pd.isna(p3):
+                        val = p3 / 100.0 * (2.0 / 3.0)
+                elif n == 4:
+                    # 用 pct_5d 的 4/5 估算
+                    p5 = row.get('pct_5d', np.nan)
+                    if not pd.isna(p5):
+                        val = p5 / 100.0 * (4.0 / 5.0)
+                    else:
+                        # 用 pct_3d 的 4/3 估算（外推，精度较低）
+                        p3 = row.get('pct_3d', np.nan)
+                        if not pd.isna(p3):
+                            val = p3 / 100.0 * (4.0 / 3.0)
+            
+            # ---- 方法3: 用 zt_return 或 latest_price/zt_close 按比例缩放 ----
+            # zt_return 和 latest_price/zt_close 都是到"最新"的总收益，
+            # 不是 N 日收益，需按 n/max_n 比例估算
+            if pd.isna(val):
+                total_ret = np.nan
+                
+                # 3a: 用 latest_price / zt_close - 1
+                lp = row.get('latest_price', np.nan)
+                zc = row.get('zt_close', np.nan)
+                if not pd.isna(lp) and not pd.isna(zc) and zc > 0:
+                    total_ret = lp / zc - 1
+                
+                # 3b: 用 zt_return（自选收益，百分比形式）
+                if pd.isna(total_ret):
+                    zt_ret = row.get('zt_return', np.nan)
+                    if not pd.isna(zt_ret):
+                        total_ret = zt_ret / 100.0
+                
+                # 按比例缩放：假设收益随天数线性累积
+                if not pd.isna(total_ret):
+                    val = total_ret * (n / max_n)
+            
+            if not pd.isna(val):
+                df.at[idx, col] = val
+                filled_count += 1
+    
+    if filled_count > 0:
+        print(f"[get_price_data] 用 CSV 数据补充了 {filled_count} 个缺失的 return_n* 值")
+    
+    return df
 
 
 def get_price_data(cleaned_df, n_days=5):
@@ -820,6 +1044,13 @@ def get_price_data(cleaned_df, n_days=5):
     # 合并行情数据
     price_df_result = pd.DataFrame(price_data_list)
     df = pd.concat([df, price_df_result], axis=1)
+    # 去除可能产生的重复列名
+    df = _dedup_columns(df)
+
+    # ---- 用 CSV 已有数据补充仍为 NaN 的 return_n* ----
+    # 当涨停日太近（如今天/昨天），JQ API 无法获取足够的后续行情，
+    # 此时用 CSV 中的 自选收益/涨幅%/最新价 等字段估算 N 日收益
+    df = _fill_missing_returns(df)
 
     print(f"[get_price_data] 行情数据获取完成")
 
@@ -869,7 +1100,7 @@ def supplement_jq_data(cleaned_df):
     missing_report = {}
     for f in key_fields:
         if f in df.columns:
-            na_count = df[f].isna().sum()
+            na_count = _safe_series(df, f).isna().sum()
             if na_count > 0:
                 missing_report[f] = na_count
     if missing_report:
@@ -896,7 +1127,7 @@ def supplement_jq_data(cleaned_df):
     # 检查哪些字段需要补充
     need_fundamental = False
     for f, _ in fundamental_fields.items():
-        if f in df.columns and df[f].isna().any():
+        if f in df.columns and _safe_series(df, f).isna().any():
             need_fundamental = True
             break
         elif f not in df.columns:
@@ -978,7 +1209,7 @@ def supplement_jq_data(cleaned_df):
     ma_fields_missing = False
     if 'ma5' not in df.columns or 'ma10' not in df.columns:
         ma_fields_missing = True
-    elif df.get('ma5', pd.Series(dtype=float)).isna().all() or df.get('ma10', pd.Series(dtype=float)).isna().all():
+    elif _safe_get(df, 'ma5', pd.Series(dtype=float)).isna().all() or _safe_get(df, 'ma10', pd.Series(dtype=float)).isna().all():
         ma_fields_missing = True
 
     if ma_fields_missing:
@@ -1013,7 +1244,7 @@ def supplement_jq_data(cleaned_df):
         print(f"[supplement_jq_data] MA5/MA10 补充完成")
 
     # ---- 3.5.3 用 get_money_flow 补充主力净流入 ----
-    if 'main_net_inflow' in df.columns and df['main_net_inflow'].isna().any():
+    if 'main_net_inflow' in df.columns and _safe_series(df, 'main_net_inflow').isna().any():
         print(f"[supplement_jq_data] 补充主力资金流向数据...")
         for idx, row in df.iterrows():
             jq_code = row.get('jq_code', '')
@@ -1041,18 +1272,18 @@ def supplement_jq_data(cleaned_df):
 
     # ---- 3.5.4 补充乖离率 ----
     if 'bias_ma5' not in df.columns and 'ma5' in df.columns and 'latest_price' in df.columns:
-        df['bias_ma5'] = np.where(
-            df['ma5'] > 0,
-            (df['latest_price'] - df['ma5']) / df['ma5'],
-            np.nan
-        )
+        _lp = _safe_series(df, 'latest_price').astype(float, errors='ignore')
+        _m5 = _safe_series(df, 'ma5').astype(float, errors='ignore')
+        df['bias_ma5'] = np.nan
+        valid = _m5 > 0
+        df.loc[valid, 'bias_ma5'] = (_lp[valid] - _m5[valid]) / _m5[valid]
         print(f"[supplement_jq_data] 乖离率(bias_ma5)已计算")
 
     # 统计补充后缺失情况
     remaining_missing = {}
     for f in key_fields:
         if f in df.columns:
-            na_count = df[f].isna().sum()
+            na_count = _safe_series(df, f).isna().sum()
             if na_count > 0:
                 remaining_missing[f] = na_count
     if remaining_missing:
@@ -1090,68 +1321,74 @@ def calc_factors(price_df):
     print(f"[calc_factors] 开始计算因子，共 {len(df)} 只股票")
 
     # ---- 4.1 价格强度因子 ----
-    df['factor_return_3d'] = df.get('return_n3', np.nan)
-    df['factor_return_5d'] = df.get('return_n5', np.nan)
-    df['factor_max_return'] = df.get('overall_max_return', np.nan)
-    df['factor_defense_ratio'] = df.get('ratio_above_defense', np.nan)
-    df['factor_above_zt_ratio'] = df.get('ratio_above_zt', np.nan)
+    df['factor_return_3d'] = _safe_get(df, 'return_n3', np.nan)
+    df['factor_return_5d'] = _safe_get(df, 'return_n5', np.nan)
+    df['factor_max_return'] = _safe_get(df, 'overall_max_return', np.nan)
+    df['factor_defense_ratio'] = _safe_get(df, 'ratio_above_defense', np.nan)
+    df['factor_above_zt_ratio'] = _safe_get(df, 'ratio_above_zt', np.nan)
 
     # ---- 4.2 趋势结构因子 ----
     if 'close_n3' in df.columns and 'ma5' in df.columns:
-        df['factor_ma5_position'] = np.where(
-            df['ma5'] > 0,
-            df['close_n3'] / df['ma5'] - 1,
-            np.nan
-        )
+        _c3 = _safe_series(df, 'close_n3').astype(float, errors='ignore')
+        _m5 = _safe_series(df, 'ma5').astype(float, errors='ignore')
+        df['factor_ma5_position'] = np.nan
+        valid = _m5 > 0
+        df.loc[valid, 'factor_ma5_position'] = _c3[valid] / _m5[valid] - 1
     else:
         df['factor_ma5_position'] = np.nan
 
-    df['factor_bias_ma5'] = df.get('bias_ma5', np.nan)
+    df['factor_bias_ma5'] = _safe_get(df, 'bias_ma5', np.nan)
 
     if 'consecutive_up_post' in df.columns:
-        df['factor_consecutive_up'] = df.get('consecutive_up', 0) + df['consecutive_up_post']
+        df['factor_consecutive_up'] = _safe_get(df, 'consecutive_up', 0) + _safe_series(df, 'consecutive_up_post')
     else:
-        df['factor_consecutive_up'] = df.get('consecutive_up', 0)
+        df['factor_consecutive_up'] = _safe_get(df, 'consecutive_up', 0)
 
-    df['factor_pct_3d'] = df.get('pct_3d', np.nan)
-    df['factor_pct_5d'] = df.get('pct_5d', np.nan)
+    df['factor_pct_3d'] = _safe_get(df, 'pct_3d', np.nan)
+    df['factor_pct_5d'] = _safe_get(df, 'pct_5d', np.nan)
 
     # ---- 4.3 成交量因子 ----
-    df['factor_vol_ratio'] = df.get('vol_ratio', np.nan)
-    df['factor_turnover'] = df.get('turnover_rate', np.nan)
-    df['factor_inner_outer'] = df.get('inner_outer_ratio', np.nan)
+    df['factor_vol_ratio'] = _safe_get(df, 'vol_ratio', np.nan)
+    df['factor_turnover'] = _safe_get(df, 'turnover_rate', np.nan)
+    df['factor_inner_outer'] = _safe_get(df, 'inner_outer_ratio', np.nan)
 
     if 'return_n1' in df.columns and 'volume_n1' in df.columns and 'volume' in df.columns:
-        vol_change = df['volume_n1'] / df['volume'].replace(0, np.nan)
-        df['factor_vol_price'] = np.where(
-            df['return_n1'] > 0,
-            vol_change,
-            -vol_change
-        )
+        _r1 = _safe_series(df, 'return_n1').astype(float, errors='ignore')
+        _vn1 = _safe_series(df, 'volume_n1').astype(float, errors='ignore')
+        _vol = _safe_series(df, 'volume').astype(float, errors='ignore').replace(0, np.nan)
+        vol_change = _vn1 / _vol
+        df['factor_vol_price'] = np.nan
+        pos = _r1 > 0
+        neg = _r1 <= 0
+        df.loc[pos, 'factor_vol_price'] = vol_change[pos]
+        df.loc[neg, 'factor_vol_price'] = -vol_change[neg]
     else:
         df['factor_vol_price'] = np.nan
 
     # ---- 4.4 资金因子 ----
-    df['factor_main_net_inflow'] = df.get('main_net_inflow', np.nan)
-    df['factor_main_net_pct'] = df.get('main_net_pct', np.nan)
-    df['factor_main_net_3d'] = df.get('main_net_inflow_3d', np.nan)
+    df['factor_main_net_inflow'] = _safe_get(df, 'main_net_inflow', np.nan)
+    df['factor_main_net_pct'] = _safe_get(df, 'main_net_pct', np.nan)
+    df['factor_main_net_3d'] = _safe_get(df, 'main_net_inflow_3d', np.nan)
 
     # ---- 4.5 基本面因子 ----
-    df['factor_pe'] = df.get('pe_ttm', df.get('pe_ratio', np.nan))
-    df['factor_roe'] = df.get('roe', np.nan)
-    df['factor_profit_yoy'] = df.get('profit_yoy', np.nan)
-    df['factor_gross_margin'] = df.get('gross_margin', np.nan)
+    _pe = _safe_get(df, 'pe_ttm', None)
+    if _pe is None or (isinstance(_pe, pd.Series) and _pe.isna().all()):
+        _pe = _safe_get(df, 'pe_ratio', np.nan)
+    df['factor_pe'] = _pe
+    df['factor_roe'] = _safe_get(df, 'roe', np.nan)
+    df['factor_profit_yoy'] = _safe_get(df, 'profit_yoy', np.nan)
+    df['factor_gross_margin'] = _safe_get(df, 'gross_margin', np.nan)
 
     # ---- 4.6 风险因子（扣分项） ----
-    df['factor_max_drawdown'] = df.get('overall_max_drawdown', np.nan)
-    df['factor_zt_open_count'] = df.get('zt_open_count', np.nan)
-    df['factor_amplitude'] = df.get('amplitude', np.nan)
+    df['factor_max_drawdown'] = _safe_get(df, 'overall_max_drawdown', np.nan)
+    df['factor_zt_open_count'] = _safe_get(df, 'zt_open_count', np.nan)
+    df['factor_amplitude'] = _safe_get(df, 'amplitude', np.nan)
 
     # ---- 4.7 涨停特征因子（辅助） ----
-    df['factor_seal_amount'] = df.get('seal_amount', np.nan)
-    df['factor_seal_ratio'] = df.get('seal_volume_ratio', np.nan)
-    df['factor_days_boards'] = df.get('days_boards', np.nan)
-    df['factor_first_zt_time'] = df.get('first_zt_time', np.nan)
+    df['factor_seal_amount'] = _safe_get(df, 'seal_amount', np.nan)
+    df['factor_seal_ratio'] = _safe_get(df, 'seal_volume_ratio', np.nan)
+    df['factor_days_boards'] = _safe_get(df, 'days_boards', np.nan)
+    df['factor_first_zt_time'] = _safe_get(df, 'first_zt_time', np.nan)
 
     print(f"[calc_factors] 因子计算完成")
 
@@ -1663,6 +1900,7 @@ def score_stock(factor_df):
 
     scores_df = pd.DataFrame(scores, index=df.index)
     df = pd.concat([df, scores_df], axis=1)
+    df = _dedup_columns(df)
 
     # 按 total_score 降序排列
     df = df.sort_values('total_score', ascending=False).reset_index(drop=True)
@@ -1866,6 +2104,7 @@ def predict_next_day(scored_df):
 
     predict_df = pd.DataFrame(predict_scores, index=candidates.index)
     result_df = pd.concat([candidates, predict_df], axis=1)
+    result_df = _dedup_columns(result_df)
 
     # 按建仓指数降序排列
     result_df = result_df.sort_values('entry_index', ascending=False).reset_index(drop=True)
@@ -1927,11 +2166,16 @@ def correlation_analysis(scored_df):
 
     # 计算相关性
     all_cols = available_factors + available_targets
-    corr_data = scored_df[all_cols].select_dtypes(include=[np.number])
+    # 用 _dedup_columns 确保无重复列名，避免 select_dtypes 异常
+    corr_src = _dedup_columns(scored_df[all_cols])
+    corr_data = corr_src.select_dtypes(include=[np.number])
     corr_matrix = corr_data.corr()
 
     # 只返回因子与目标之间的相关性
     factor_target_corr = corr_matrix.loc[available_factors, available_targets]
+
+    # 添加因子中文名列
+    factor_target_corr.insert(0, '因子中文名', [FACTOR_NAME_CN.get(f, f) for f in factor_target_corr.index])
 
     print(f"[correlation_analysis] 分析完成，{len(available_factors)} 个因子 × {len(available_targets)} 个目标")
 
@@ -1939,6 +2183,165 @@ def correlation_analysis(scored_df):
 
 
 print('✅ correlation_analysis() 已定义')
+
+
+# ## 11.5 模块 8.5: `factor_effectiveness_analysis()` — 因子有效性分析
+
+# In[13.5]:
+
+
+def factor_effectiveness_analysis(scored_df):
+    """
+    分析因子有效性：哪些因子对 N 日收益有显著预测能力，哪些无关。
+
+    方法：
+    1. 计算每个因子与 return_n1~n5 的 Pearson 相关系数及 p 值
+    2. 计算 IC (Information Coefficient) = rank correlation (Spearman)
+    3. 按 IC 绝对值排序，标记有效/弱有效/无效因子
+    4. 输出因子选择建议
+
+    Parameters
+    ----------
+    scored_df : pd.DataFrame
+        score_stock() 输出的含评分和因子数据
+
+    Returns
+    -------
+    dict
+        'effectiveness_df': pd.DataFrame — 因子有效性详表
+        'selected_factors': list — 推荐使用的有效因子
+        'irrelevant_factors': list — 建议剔除的无关因子
+    """
+    from scipy import stats as scipy_stats
+
+    print(f"[factor_effectiveness_analysis] 开始因子有效性分析")
+
+    # 因子列表
+    factor_cols = [
+        'factor_return_3d', 'factor_return_5d', 'factor_max_return',
+        'factor_defense_ratio', 'factor_above_zt_ratio',
+        'factor_ma5_position', 'factor_bias_ma5', 'factor_consecutive_up',
+        'factor_pct_3d', 'factor_pct_5d',
+        'factor_vol_ratio', 'factor_turnover', 'factor_inner_outer', 'factor_vol_price',
+        'factor_main_net_inflow', 'factor_main_net_pct', 'factor_main_net_3d',
+        'factor_pe', 'factor_roe', 'factor_profit_yoy', 'factor_gross_margin',
+        'factor_max_drawdown', 'factor_zt_open_count', 'factor_amplitude',
+        'factor_seal_amount', 'factor_seal_ratio', 'factor_days_boards',
+    ]
+
+    # 目标变量
+    target_cols = ['return_n1', 'return_n2', 'return_n3', 'return_n4', 'return_n5']
+
+    # 筛选存在的列
+    available_factors = [c for c in factor_cols if c in scored_df.columns]
+    available_targets = [c for c in target_cols if c in scored_df.columns]
+
+    if not available_factors or not available_targets:
+        print("[factor_effectiveness_analysis] 可用因子或目标变量不足，跳过")
+        return {
+            'effectiveness_df': pd.DataFrame(),
+            'selected_factors': [],
+            'irrelevant_factors': [],
+        }
+
+    results = []
+
+    for factor in available_factors:
+        factor_data = _safe_series(scored_df, factor).dropna()
+        if len(factor_data) < 5:
+            continue
+
+        row_result = {'factor': factor, 'factor_cn': FACTOR_NAME_CN.get(factor, factor)}
+
+        for target in available_targets:
+            target_data = _safe_series(scored_df, target).dropna()
+            # 取交集
+            common_idx = factor_data.index.intersection(target_data.index)
+            if len(common_idx) < 5:
+                continue
+
+            x = _safe_series(scored_df.loc[common_idx], factor).astype(float, errors='ignore')
+            y = _safe_series(scored_df.loc[common_idx], target).astype(float, errors='ignore')
+
+            # Pearson 相关系数
+            try:
+                pearson_r, pearson_p = scipy_stats.pearsonr(x, y)
+            except Exception:
+                pearson_r, pearson_p = np.nan, np.nan
+
+            # Spearman rank 相关系数 (IC)
+            try:
+                spearman_r, spearman_p = scipy_stats.spearmanr(x, y)
+            except Exception:
+                spearman_r, spearman_p = np.nan, np.nan
+
+            row_result[f'pearson_{target}'] = pearson_r
+            row_result[f'pearson_p_{target}'] = pearson_p
+            row_result[f'IC_{target}'] = spearman_r
+            row_result[f'IC_p_{target}'] = spearman_p
+
+        # 计算平均 |IC| 和平均 |Pearson|
+        ic_cols = [c for c in row_result if c.startswith('IC_') and not c.startswith('IC_p')]
+        pearson_cols = [c for c in row_result if c.startswith('pearson_') and not c.startswith('pearson_p')]
+
+        if ic_cols:
+            ic_vals = [abs(row_result[c]) for c in ic_cols if not pd.isna(row_result.get(c))]
+            row_result['avg_abs_IC'] = np.mean(ic_vals) if ic_vals else 0
+        else:
+            row_result['avg_abs_IC'] = 0
+
+        if pearson_cols:
+            p_vals = [abs(row_result[c]) for c in pearson_cols if not pd.isna(row_result.get(c))]
+            row_result['avg_abs_pearson'] = np.mean(p_vals) if p_vals else 0
+        else:
+            row_result['avg_abs_pearson'] = 0
+
+        # 判断有效性
+        avg_ic = row_result['avg_abs_IC']
+        if avg_ic >= 0.3:
+            row_result['effectiveness'] = '✅ 有效'
+            row_result['recommendation'] = '保留使用'
+        elif avg_ic >= 0.15:
+            row_result['effectiveness'] = '🟡 弱有效'
+            row_result['recommendation'] = '可考虑保留'
+        elif avg_ic >= 0.05:
+            row_result['effectiveness'] = '⚠️ 微弱'
+            row_result['recommendation'] = '建议观察'
+        else:
+            row_result['effectiveness'] = '❌ 无效'
+            row_result['recommendation'] = '建议剔除'
+
+        results.append(row_result)
+
+    eff_df = pd.DataFrame(results)
+
+    if len(eff_df) == 0:
+        print("[factor_effectiveness_analysis] 无有效分析结果")
+        return {
+            'effectiveness_df': pd.DataFrame(),
+            'selected_factors': [],
+            'irrelevant_factors': [],
+        }
+
+    # 按 avg_abs_IC 降序排列
+    eff_df = eff_df.sort_values('avg_abs_IC', ascending=False).reset_index(drop=True)
+
+    # 分类
+    selected = eff_df[eff_df['effectiveness'].isin(['✅ 有效', '🟡 弱有效'])]['factor'].tolist()
+    irrelevant = eff_df[eff_df['effectiveness'].isin(['❌ 无效', '⚠️ 微弱'])]['factor'].tolist()
+
+    print(f"[factor_effectiveness_analysis] 分析完成:")
+    print(f"  ✅ 有效因子 ({len(selected)}): {selected[:10]}{'...' if len(selected) > 10 else ''}")
+    print(f"  ❌ 无效因子 ({len(irrelevant)}): {irrelevant[:10]}{'...' if len(irrelevant) > 10 else ''}")
+
+    return {
+        'effectiveness_df': eff_df,
+        'selected_factors': selected,
+        'irrelevant_factors': irrelevant,
+    }
+
+
+print('✅ factor_effectiveness_analysis() 已定义')
 
 
 # ## 12. 模块 9: `output_results()` — 输出结果
@@ -1989,16 +2392,17 @@ def _generate_trade_signal(candidates_df):
 
 
 def output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
-                   scored_df, corr_df, predict_df=None):
+                   scored_df, corr_df, predict_df=None, factor_eff=None):
     """
-    输出6个表 + 交易候选排序。
+    输出7个表 + 交易候选排序。
 
     表1: 清洗后股票列表
     表2: N日表现表
     表3: 强势股列表（重点）
     表4: 因子相关性表
-    表5: 每日交易候选排序表
-    表6: 次日建仓预测表（新增）
+    表5: 因子有效性分析表（新增）
+    表6: 每日交易候选排序表
+    表7: 次日建仓预测表
     """
     print('\n' + '=' * 80)
     print('涨停板股票后 N 日走势分析 — 结果输出')
@@ -2013,7 +2417,9 @@ def output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
                       'turnover_rate', 'vol_ratio', 'main_net_inflow', 'consecutive_up']
     available_cols_1 = [c for c in display_cols_1 if c in cleaned_df.columns]
     if available_cols_1:
-        _display(cleaned_df[available_cols_1].head(20))
+        df1 = cleaned_df[available_cols_1].head(20).copy()
+        cn_map_1 = {c: COLUMN_NAME_CN.get(c, c) for c in df1.columns}
+        _display(df1.rename(columns=cn_map_1))
     else:
         _display(cleaned_df.head(20))
 
@@ -2033,11 +2439,13 @@ def output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
 
     if not strong_df.empty:
         display_cols_3 = ['code', 'name', 'zt_date', 'zt_close', 'total_score',
-                          'return_n1', 'return_n3', 'return_n5',
+                          'return_n1', 'return_n2', 'return_n3', 'return_n4', 'return_n5',
                           'ratio_above_zt', 'ratio_above_defense',
                           'main_net_inflow', 'turnover_rate', 'consecutive_up']
         available_cols_3 = [c for c in display_cols_3 if c in strong_df.columns]
-        _display(strong_df[available_cols_3])
+        df3 = strong_df[available_cols_3].copy()
+        cn_map_3 = {c: COLUMN_NAME_CN.get(c, c) for c in df3.columns}
+        _display(df3.rename(columns=cn_map_3))
     else:
         print('无强势股')
 
@@ -2047,13 +2455,43 @@ def output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
     print('─' * 60)
 
     if not corr_df.empty:
-        _display(corr_df.round(3))
+        corr_display = corr_df.round(3).copy()
+        corr_display.index = [FACTOR_NAME_CN.get(f, f) for f in corr_display.index]
+        cn_map_corr = {c: COLUMN_NAME_CN.get(c, c) for c in corr_display.columns}
+        _display(corr_display.rename(columns=cn_map_corr))
     else:
         print('无相关性数据')
 
-    # ---- 表5: 每日交易候选排序表 ----
+    # ---- 表5: 因子有效性分析表（新增）----
     print('\n' + '─' * 60)
-    print('📊 表5: 每日交易候选排序表')
+    print('📊 表5: 因子有效性分析表（🔍 新增）')
+    print('─' * 60)
+
+    if factor_eff is not None and not factor_eff.get('effectiveness_df', pd.DataFrame()).empty:
+        eff_df = factor_eff['effectiveness_df']
+        # 显示关键列（含中文名）
+        display_cols_eff = ['factor_cn', 'factor', 'avg_abs_IC', 'avg_abs_pearson', 'effectiveness', 'recommendation']
+        available_cols_eff = [c for c in display_cols_eff if c in eff_df.columns]
+        eff_display = eff_df[available_cols_eff].copy()
+        cn_map_eff = {c: COLUMN_NAME_CN.get(c, c) for c in eff_display.columns}
+        _display(eff_display.rename(columns=cn_map_eff))
+
+        # 输出因子选择建议（中文名）
+        selected = factor_eff.get('selected_factors', [])
+        irrelevant = factor_eff.get('irrelevant_factors', [])
+        sel_cn = [FACTOR_NAME_CN.get(f, f) for f in selected[:8]]
+        irr_cn = [FACTOR_NAME_CN.get(f, f) for f in irrelevant[:8]]
+        sel_str = ", ".join(sel_cn) + ("..." if len(selected) > 8 else "")
+        irr_str = ", ".join(irr_cn) + ("..." if len(irrelevant) > 8 else "")
+        print(f'\n💡 因子选择建议:')
+        print(f'  ✅ 推荐保留 ({len(selected)} 个): {sel_str}')
+        print(f'  ❌ 建议剔除 ({len(irrelevant)} 个): {irr_str}')
+    else:
+        print('无因子有效性分析数据')
+
+    # ---- 表6: 每日交易候选排序表 ----
+    print('\n' + '─' * 60)
+    print('📊 表6: 每日交易候选排序表')
     print('─' * 60)
 
     if not scored_df.empty:
@@ -2063,24 +2501,25 @@ def output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
 
         display_cols_5 = ['code', 'name', 'zt_date', 'zt_close', 'total_score',
                           'classification', 'trade_signal',
-                          'return_n1', 'return_n3', 'return_n5',
+                          'return_n1', 'return_n2', 'return_n3', 'return_n4', 'return_n5',
                           'main_net_inflow', 'vol_ratio']
         available_cols_5 = [c for c in display_cols_5 if c in candidates.columns]
+        cn_map_5 = {c: COLUMN_NAME_CN.get(c, c) for c in available_cols_5}
 
         top_k = CONFIG['top_k']
         if len(candidates) > top_k:
             print(f'\n🏆 主选股票 (Top {top_k}):')
-            _display(candidates[available_cols_5].head(top_k))
+            _display(candidates[available_cols_5].head(top_k).rename(columns=cn_map_5))
             print(f'\n📋 候补股票:')
-            _display(candidates[available_cols_5].iloc[top_k:])
+            _display(candidates[available_cols_5].iloc[top_k:].rename(columns=cn_map_5))
         else:
-            _display(candidates[available_cols_5])
+            _display(candidates[available_cols_5].rename(columns=cn_map_5))
     else:
         print('无候选股票')
 
-    # ---- 表6: 次日建仓预测表（新增）----
+    # ---- 表7: 次日建仓预测表 ----
     print('\n' + '─' * 60)
-    print('📊 表6: 次日建仓预测表（🔮 新增）')
+    print('📊 表7: 次日建仓预测表（🔮）')
     print('─' * 60)
 
     if predict_df is not None and not predict_df.empty:
@@ -2089,15 +2528,16 @@ def output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
                           'buy_price', 'stop_loss', 'target_price',
                           'main_net_inflow', 'vol_ratio', 'consecutive_up']
         available_cols_6 = [c for c in display_cols_6 if c in predict_df.columns]
+        cn_map_6 = {c: COLUMN_NAME_CN.get(c, c) for c in available_cols_6}
 
         top_k = CONFIG['top_k']
         if len(predict_df) > top_k:
             print(f'\n🏆 主选建仓标的 (Top {top_k}):')
-            _display(predict_df[available_cols_6].head(top_k))
+            _display(predict_df[available_cols_6].head(top_k).rename(columns=cn_map_6))
             print(f'\n📋 候补建仓标的:')
-            _display(predict_df[available_cols_6].iloc[top_k:])
+            _display(predict_df[available_cols_6].iloc[top_k:].rename(columns=cn_map_6))
         else:
-            _display(predict_df[available_cols_6])
+            _display(predict_df[available_cols_6].rename(columns=cn_map_6))
 
         # 输出预测汇总
         print(f'\n💡 次日建仓建议汇总:')
@@ -2199,12 +2639,15 @@ def run_analysis(file_path=None, filter_st=True, filter_yizhi=True):
     # Step 9: 因子相关性分析
     corr_df = correlation_analysis(scored_df)
 
-    # Step 10: 次日建仓预测
+    # Step 10: 因子有效性分析
+    factor_eff = factor_effectiveness_analysis(scored_df)
+
+    # Step 11: 次日建仓预测
     predict_df = predict_next_day(scored_df)
 
-    # Step 11: 输出结果
+    # Step 12: 输出结果
     output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
-                   scored_df, corr_df, predict_df)
+                   scored_df, corr_df, predict_df, factor_eff)
 
     # 返回所有结果
     results = {
@@ -2216,6 +2659,7 @@ def run_analysis(file_path=None, filter_st=True, filter_yizhi=True):
         'weak_df': weak_df,
         'scored_df': scored_df,
         'corr_df': corr_df,
+        'factor_eff': factor_eff,
         'predict_df': predict_df,
     }
 
@@ -2356,9 +2800,10 @@ if len(cleaned_df) > 0:
     classified_df, strong_df, neutral_df, weak_df = classify_stock(factor_df)
     scored_df = score_stock(classified_df)
     corr_df = correlation_analysis(scored_df)
+    factor_eff = factor_effectiveness_analysis(scored_df)
     predict_df = predict_next_day(scored_df)
     output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
-                   scored_df, corr_df, predict_df)
+                   scored_df, corr_df, predict_df, factor_eff)
 
 
 # ---
