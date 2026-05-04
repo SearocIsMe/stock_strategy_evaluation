@@ -2476,7 +2476,7 @@ def check_take_profit(context, data) -> None:
 
         # Feature 10: T+1规则 — 当日新建仓股票不能止盈（A股T+1限制）
         if hold_days == 0:
-            log.info(f"[止盈] {code} 当日新建仓(T+0)，跳过止盈检查")
+            log.debug(f"[止盈] {code} 当日新建仓(T+0)，跳过止盈检查")
             continue
 
         # 1. T+1利润 > 9% + 涨停开板检查
@@ -2544,7 +2544,7 @@ def check_stop_loss(context, data) -> None:
 
         # T+1规则：当日新建仓股票不能卖出，跳过止损检查
         if buy_date is not None and buy_date == today:
-            log.info(f"[止损] {code} 当日新建仓(T+0)，跳过止损检查")
+            log.debug(f"[止损] {code} 当日新建仓(T+0)，跳过止损检查")
             continue
 
         # 获取当前价格
@@ -2679,7 +2679,7 @@ def _sell_position(context, code: str, reason: str = '') -> None:
     buy_date = holding.get('buy_date')
     today = context.current_dt.date()
     if buy_date is not None and buy_date == today:
-        log.info(f"[_sell_position] {code} {name} 当日新建仓(T+0)，不能卖出 (原因: {reason})")
+        log.debug(f"[_sell_position] {code} {name} 当日新建仓(T+0)，不能卖出 (原因: {reason})")
         return
 
     shares = holding.get('shares', 0)
@@ -3275,7 +3275,10 @@ def initialize(context):
     log.info(f"[initialize] 最大持仓: {STRATEGY_CONFIG['max_holdings']}, "
              f"每日最大建仓: {STRATEGY_CONFIG['max_entry_count']}, "
              f"ZT阈值: {STRATEGY_CONFIG['zt_count_threshold']}")
-
+    # 设置日志级别
+    log.set_level('order', 'error')   # 订单日志只报错
+    log.set_level('system', 'error')  # 系统日志只报错
+    log.set_level('strategy', 'info') # 策略日志显示debug信息
 
 def before_trading_start(context):
     """
