@@ -248,8 +248,11 @@ def get_yesterday_zt_stocks(context) -> pd.DataFrame:
 
     price_df = pd.concat(all_prices, ignore_index=True)
 
-    # 筛选涨停股 (涨幅 >= zt_threshold)
-    zt_df = price_df[price_df['pct_change'] >= STRATEGY_CONFIG['zt_threshold']].copy()
+    # 筛选涨停股 (涨幅 >= zt_threshold 且 收盘价=最高价，即封涨停)
+    zt_df = price_df[
+        (price_df['pct_change'] >= STRATEGY_CONFIG['zt_threshold']) &
+        (price_df['close'] == price_df['high'])
+    ].copy()
 
     if zt_df.empty:
         return pd.DataFrame()
@@ -2159,17 +2162,17 @@ def execute_type_a(context, data, code: str, signal: Dict) -> bool:
                 cur_data = get_current_data()
                 high_limit = cur_data[code].high_limit
                 if high_limit and high_limit > 0:
-                    order_result = order(code, shares, limit_price=high_limit)
+                    order_result = order(code, shares, style=LimitOrder(high_limit))
                     if order_result is not None and _check_order_filled(context, code):
                         signal['first_leg_done'] = True
                         signal['second_leg_done'] = True  # 单腿完成
-                        log.info(f"[TYPE_A] {code} 笼子上限挂单买入 {shares} 股，挂单价 {high_limit:.2f}")
+                        log.debug(f"[TYPE_A] {code} 笼子上限挂单买入 {shares} 股，挂单价 {high_limit:.2f}")
                         _record_holding(context, code, signal, shares, leg='full')
                         return True
                     else:
-                        log.trace(f"[TYPE_A] {code} 笼子上限挂单未成交")
+                        log.debug(f"[TYPE_A] {code} 笼子上限挂单未成交")
                 else:
-                    log.trace(f"[TYPE_A] {code} 无法获取笼子上限价格")
+                    log.debug(f"[TYPE_A] {code} 无法获取笼子上限价格")
             except Exception as e:
                 log.info(f"[TYPE_A] {code} 笼子上限挂单失败: {e}")
         return False
@@ -2205,9 +2208,9 @@ def execute_type_b(context, data, code: str, signal: Dict) -> bool:
                     _record_holding(context, code, signal, shares, leg='first')
                     return True
                 else:
-                    log.trace(f"[TYPE_B] {code} 金叉买入未成交（可能涨停/停牌）")
+                    log.debug(f"[TYPE_B] {code} 金叉买入未成交（可能涨停/停牌）")
             except Exception as e:
-                log.info(f"[TYPE_B] {code} 金叉买入失败: {e}")
+                log.debug(f"[TYPE_B] {code} 金叉买入失败: {e}")
         return False
 
     elif not signal['second_leg_done']:
@@ -2227,7 +2230,7 @@ def execute_type_b(context, data, code: str, signal: Dict) -> bool:
                         _update_holding(context, code, shares, leg='second')
                         return True
                     else:
-                        log.trace(f"[TYPE_B] {code} 补仓买入未成交")
+                        log.debug(f"[TYPE_B] {code} 补仓买入未成交")
                 except Exception as e:
                     log.info(f"[TYPE_B] {code} 补仓买入失败: {e}")
         return False
@@ -2251,7 +2254,7 @@ def execute_type_c(context, data, code: str, signal: Dict) -> bool:
         high_limit = cur_data[code].high_limit
         current_price = cur_data[code].last_price
         if high_limit and current_price >= high_limit:
-            log.trace(f"[TYPE_C] {code} 已涨停，当天不再挂单买入")
+            log.debug(f"[TYPE_C] {code} 已涨停，当天不再挂单买入")
             signal['skip_today'] = True
             return False
     except Exception:
@@ -2283,15 +2286,15 @@ def execute_type_c(context, data, code: str, signal: Dict) -> bool:
         shares = calc_position_size(context, code, ratio=0.5)
         if shares > 0:
             try:
-                order_result = order(code, shares, limit_price=auction_price)
+                order_result = order(code, shares, style=LimitOrder(auction_price))
                 if order_result is not None and _check_order_filled(context, code):
                     signal['first_leg_done'] = True
-                    log.info(f"[TYPE_C] {code} 集合竞价买入 {shares} 股，竞价 {auction_price:.2f}")
+                    log.debug(f"[TYPE_C] {code} 集合竞价买入 {shares} 股，竞价 {auction_price:.2f}")
                     _record_holding(context, code, signal, shares, leg='first')
                     return True
                 else:
                     signal['first_leg_done'] = True  # 标记已尝试，进入第二腿
-                    log.trace(f"[TYPE_C] {code} 集合竞价未成交，进入第二腿 ({signal['second_leg_type']})")
+                    log.debug(f"[TYPE_C] {code} 集合竞价未成交，进入第二腿 ({signal['second_leg_type']})")
             except Exception as e:
                 log.info(f"[TYPE_C] {code} 集合竞价挂单失败: {e}")
                 return False
@@ -2312,16 +2315,16 @@ def execute_type_c(context, data, code: str, signal: Dict) -> bool:
                     order_result = order(code, shares)
                     if order_result is not None and _check_order_filled(context, code):
                         signal['second_leg_done'] = True
-                        log.info(f"[TYPE_C] {code} 金叉买入 {shares} 股 (50%仓位)")
+                        log.debug(f"[TYPE_C] {code} 金叉买入 {shares} 股 (50%仓位)")
                         if code in g.holdings:
                             _update_holding(context, code, shares, leg='second')
                         else:
                             _record_holding(context, code, signal, shares, leg='full')
                         return True
                     else:
-                        log.trace(f"[TYPE_C] {code} 金叉买入未成交")
+                        log.debug(f"[TYPE_C] {code} 金叉买入未成交")
                 except Exception as e:
-                    log.info(f"[TYPE_C] {code} 金叉买入失败: {e}")
+                    log.debug(f"[TYPE_C] {code} 金叉买入失败: {e}")
             return False
 
         elif second_leg_type == 'market_order':
@@ -2341,7 +2344,7 @@ def execute_type_c(context, data, code: str, signal: Dict) -> bool:
                             _record_holding(context, code, signal, shares, leg='full')
                         return True
                     else:
-                        log.trace(f"[TYPE_C] {code} 市价买入未成交")
+                        log.info(f"[TYPE_C] {code} 市价买入未成交")
                 except Exception as e:
                     log.info(f"[TYPE_C] {code} 市价买入失败: {e}")
             return False
@@ -2470,7 +2473,7 @@ def check_take_profit(context, data) -> None:
 
         # Feature 10: T+1规则 — 当日新建仓股票不能止盈（A股T+1限制）
         if hold_days == 0:
-            log.trace(f"[止盈] {code} 当日新建仓(T+0)，跳过止盈检查")
+            log.info(f"[止盈] {code} 当日新建仓(T+0)，跳过止盈检查")
             continue
 
         # 1. T+1利润 > 9% + 涨停开板检查
@@ -2480,7 +2483,7 @@ def check_take_profit(context, data) -> None:
                 # 检查是否封涨停：当前价格在涨停价则继续持股，开板则止盈
                 high_limit = cur_data[code].high_limit
                 if high_limit and current_price >= high_limit:
-                    log.trace(f"[止盈] {code} T+{hold_days}利润 {profit_pct:.1%} > {STRATEGY_CONFIG['t1_profit_take_pct']:.0%}，但封涨停，继续持股")
+                    log.info(f"[止盈] {code} T+{hold_days}利润 {profit_pct:.1%} > {STRATEGY_CONFIG['t1_profit_take_pct']:.0%}，但封涨停，继续持股")
                     # 封涨停，不卖出，继续持股让利润奔跑
                 else:
                     log.info(f"[止盈] {code} T+{hold_days}利润 {profit_pct:.1%} > {STRATEGY_CONFIG['t1_profit_take_pct']:.0%}，涨停开板，止盈")
@@ -2538,7 +2541,7 @@ def check_stop_loss(context, data) -> None:
 
         # T+1规则：当日新建仓股票不能卖出，跳过止损检查
         if buy_date is not None and buy_date == today:
-            log.trace(f"[止损] {code} 当日新建仓(T+0)，跳过止损检查")
+            log.info(f"[止损] {code} 当日新建仓(T+0)，跳过止损检查")
             continue
 
         # 获取当前价格
@@ -3404,9 +3407,9 @@ def handle_data(context, data):
                     open_price = cur_data[code].last_price
                     if open_price and open_price > 0:
                         g.auction_prices[code] = open_price
-                        log.trace(f"[TYPE_C] {code} 捕获集合竞价(开盘价): {open_price:.2f}")
+                        log.debug(f"[TYPE_C] {code} 捕获集合竞价(开盘价): {open_price:.2f}")
         except Exception as e:
-            log.trace(f"[TYPE_C] 捕获集合竞价异常: {e}")
+            log.debug(f"[TYPE_C] 捕获集合竞价异常: {e}")
 
     # 1. 检查止损
     check_stop_loss(context, data)
