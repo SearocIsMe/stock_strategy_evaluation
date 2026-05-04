@@ -94,6 +94,11 @@ STRATEGY_CONFIG = {
     'defense_line': -0.03,
     'zt_threshold': 9.8,
     'N_days': [1, 2, 3, 4, 5],
+
+    # --- 涨停后建仓日分析 ---
+    'post_zt_max_track_days': 10,       # ZT后最多跟踪天数
+    'post_zt_hold_days': [1, 2, 3, 4, 5],  # 持仓天数分析维度
+    'post_zt_log_interval': 20,         # 每N个交易日输出一次分析
 }
 
 
@@ -2477,6 +2482,243 @@ def log_daily_summary(context):
 
 
 # ============================================================================
+# Section 16.5: 涨停后建仓日分析
+# ============================================================================
+
+def update_post_zt_tracker(context):
+    """
+    盘后更新涨停后每日收盘价跟踪器。
+    
+    对股票池中每只股票，记录其ZT日后的每日收盘价。
+    超过跟踪天数的股票自动移除。
+    
+    g.post_zt_tracker 结构:
+    {
+        '000001.XSHE': {
+            'zt_date': date(2024,1,3),
+            'name': '平安银行',
+            'daily_closes': {
+                date(2024,1,4): 10.5,   # T+1 收盘价
+                date(2024,1,5): 10.8,   # T+2 收盘价
+                ...
+            }
+        },
+        ...
+    }
+    """
+    today = context.current_dt.date()
+    max_track = STRATEGY_CONFIG.get('post_zt_max_track_days', 10)
+    pool = g.stock_pool
+
+    if pool.empty or 'jq_code' not in pool.columns:
+        return
+
+    # 获取池中所有股票今日收盘价 (批量)
+    stock_codes = pool['jq_code'].tolist()
+    today_closes = {}
+
+    try:
+        for code in stock_codes:
+            try:
+                cur_data = get_current_data()
+                price = cur_data[code].last_price
+                if price and price > 0:
+                    today_closes[code] = price
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    # 更新跟踪器
+    for idx, row in pool.iterrows():
+        code = row.get('jq_code', '')
+        zt_date = row.get('zt_date')
+        name = row.get('name', '')
+
+        if not code or not zt_date:
+            continue
+
+        # 计算 ZT 后天数
+        if hasattr(zt_date, 'date'):
+            zt_date_val = zt_date.date()
+        elif isinstance(zt_date, dt.date):
+            zt_date_val = zt_date
+        else:
+            try:
+                zt_date_val = pd.Timestamp(zt_date).date()
+            except Exception:
+                continue
+
+        days_after_zt = (today - zt_date_val).days
+
+        # 超过跟踪天数，跳过 (后续清理)
+        if days_after_zt > max_track:
+            continue
+
+        # 初始化跟踪记录
+        if code not in g.post_zt_tracker:
+            g.post_zt_tracker[code] = {
+                'zt_date': zt_date_val,
+                'name': name,
+                'daily_closes': {},
+            }
+
+        # 记录今日收盘价
+        if code in today_closes:
+            g.post_zt_tracker[code]['daily_closes'][today] = today_closes[code]
+
+    # 清理超过跟踪天数的股票
+    expired_codes = []
+    for code, tracker in g.post_zt_tracker.items():
+        zt_d = tracker.get('zt_date')
+        if zt_d and (today - zt_d).days > max_track:
+            expired_codes.append(code)
+    for code in expired_codes:
+        del g.post_zt_tracker[code]
+
+    # 清理已不在股票池中的股票
+    pool_codes = set(pool['jq_code'].tolist())
+    removed_codes = [c for c in g.post_zt_tracker if c not in pool_codes]
+    for code in removed_codes:
+        del g.post_zt_tracker[code]
+
+
+def analyze_post_zt_returns(context):
+    """
+    分析涨停后不同建仓日的收益表现。
+    
+    生成一个 entry_day × hold_days 的收益矩阵:
+    - entry_day: ZT后第N天建仓 (T+1, T+2, ..., T+N)
+    - hold_days: 持仓M天后的收益
+    
+    例如: entry_day=1, hold_days=2 表示 T+1建仓，持仓2天后的平均收益
+    
+    Returns
+    -------
+    pd.DataFrame
+        收益矩阵，行为建仓日(T+1~T+N)，列为持仓天数(1~5)
+    """
+    max_track = STRATEGY_CONFIG.get('post_zt_max_track_days', 10)
+    hold_days_list = STRATEGY_CONFIG.get('post_zt_hold_days', [1, 2, 3, 4, 5])
+    tracker = g.post_zt_tracker
+
+    if not tracker:
+        return None
+
+    # 收集所有 (entry_day, hold_day, return) 样本
+    samples = []  # list of (entry_day, hold_days, return_pct, code)
+
+    for code, track_data in tracker.items():
+        zt_date = track_data.get('zt_date')
+        daily_closes = track_data.get('daily_closes', {})
+
+        if not zt_date or not daily_closes or len(daily_closes) < 2:
+            continue
+
+        # 按日期排序
+        sorted_dates = sorted(daily_closes.keys())
+
+        # 对每个可能的建仓日 (T+1 ~ T+max_track-1)
+        for entry_offset in range(1, max_track):
+            # 找到建仓日的收盘价
+            entry_date = None
+            entry_close = None
+
+            for d in sorted_dates:
+                days_after = (d - zt_date).days
+                if days_after == entry_offset:
+                    entry_date = d
+                    entry_close = daily_closes[d]
+                    break
+
+            if entry_close is None or entry_close <= 0:
+                continue
+
+            # 对每个持仓天数，计算收益
+            for hd in hold_days_list:
+                # 找到持仓hd天后的日期和收盘价
+                # 需要找到 entry_date 之后的第 hd 个交易日
+                entry_idx = sorted_dates.index(entry_date)
+                exit_idx = entry_idx + hd
+
+                if exit_idx < len(sorted_dates):
+                    exit_close = daily_closes[sorted_dates[exit_idx]]
+                    if exit_close > 0:
+                        ret = (exit_close - entry_close) / entry_close
+                        samples.append((entry_offset, hd, ret, code))
+
+    if not samples:
+        return None
+
+    # 构建收益矩阵
+    entry_days = sorted(set(s[0] for s in samples))
+    hold_days_cols = sorted(set(s[1] for s in samples))
+
+    # 统计每个 (entry_day, hold_days) 的平均收益和样本数
+    from collections import defaultdict
+    ret_sum = defaultdict(float)
+    ret_count = defaultdict(int)
+    win_count = defaultdict(int)
+
+    for entry_offset, hd, ret, code in samples:
+        key = (entry_offset, hd)
+        ret_sum[key] += ret
+        ret_count[key] += 1
+        if ret > 0:
+            win_count[key] += 1
+
+    # 构建DataFrame
+    rows = []
+    for ed in entry_days:
+        row = {'建仓日': f'T+{ed}'}
+        for hd in hold_days_cols:
+            key = (ed, hd)
+            if ret_count[key] > 0:
+                avg_ret = ret_sum[key] / ret_count[key]
+                win_rate = win_count[key] / ret_count[key]
+                row[f'持仓{hd}日收益'] = f'{avg_ret:.2%}'
+                row[f'持仓{hd}日胜率'] = f'{win_rate:.0%}'
+                row[f'持仓{hd}日样本'] = ret_count[key]
+            else:
+                row[f'持仓{hd}日收益'] = '-'
+                row[f'持仓{hd}日胜率'] = '-'
+                row[f'持仓{hd}日样本'] = 0
+        rows.append(row)
+
+    result_df = pd.DataFrame(rows)
+
+    # 输出分析日志
+    log.info("=" * 80)
+    log.info("📊 涨停后建仓日收益分析")
+    log.info(f"   样本总数: {len(samples)} | 跟踪股票数: {len(tracker)}")
+
+    # 简化版: 只输出收益矩阵
+    simple_rows = []
+    for ed in entry_days:
+        row = {'建仓日': f'T+{ed}'}
+        for hd in hold_days_cols:
+            key = (ed, hd)
+            if ret_count[key] > 0:
+                avg_ret = ret_sum[key] / ret_count[key]
+                win_rate = win_count[key] / ret_count[key]
+                row[f'持{hd}日'] = f'{avg_ret:+.1%}(胜{win_rate:.0%}/N={ret_count[key]})'
+            else:
+                row[f'持{hd}日'] = '-'
+        simple_rows.append(row)
+
+    for row in simple_rows:
+        parts = [f"  {row['建仓日']}"]
+        for hd in hold_days_cols:
+            col = f'持{hd}日'
+            parts.append(f"{row.get(col, '-')}")
+        log.info(' | '.join(parts))
+
+    log.info("=" * 80)
+
+    return result_df
+
+
+# ============================================================================
 # Section 17: JQ策略框架
 # ============================================================================
 
@@ -2505,6 +2747,8 @@ def initialize(context):
     g.crash_checked_today = False  # 今日是否已检查崩盘
     g.crash_detected_today = False # 今日是否检测到崩盘
     g.trade_enabled_today = True   # 今日是否允许交易
+    g.post_zt_tracker = {}         # 涨停后建仓日分析跟踪器
+    g.trading_day_count = 0        # 交易日计数器
 
     log.info("[initialize] 涨停板交易策略初始化完成")
     log.info(f"[initialize] 最大持仓: {STRATEGY_CONFIG['max_holdings']}, "
@@ -2715,3 +2959,15 @@ def after_trading_end(context):
 
     # 5. 输出盘后日志
     log_daily_summary(context)
+
+    # 6. 更新涨停后建仓日分析跟踪器
+    g.trading_day_count += 1
+    try:
+        update_post_zt_tracker(context)
+
+        # 每N个交易日输出一次分析
+        log_interval = STRATEGY_CONFIG.get('post_zt_log_interval', 20)
+        if g.trading_day_count % log_interval == 0:
+            analyze_post_zt_returns(context)
+    except Exception as e:
+        log.info(f"[after_trading_end] 涨停后分析异常: {e}")
