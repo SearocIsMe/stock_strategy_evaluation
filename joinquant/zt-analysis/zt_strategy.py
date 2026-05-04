@@ -2152,7 +2152,7 @@ def execute_entry(context, data) -> None:
 def execute_type_a(context, data, code: str, signal: Dict) -> bool:
     """
     TYPE_A: 强势+积极建仓
-    - 开盘100%笼子上限挂单（涨停价限价单）
+    - 开盘100%市价买入（JQ笼子机制自动限制价格在上限内）
     """
     if not signal['first_leg_done']:
         # 100%仓位，按照笼子上限（涨停价）挂单
@@ -2161,18 +2161,20 @@ def execute_type_a(context, data, code: str, signal: Dict) -> bool:
             try:
                 cur_data = get_current_data()
                 high_limit = cur_data[code].high_limit
-                if high_limit and high_limit > 0:
-                    order_result = order(code, shares, style=LimitOrder(high_limit))
+                current_price = cur_data[code].last_price
+                if current_price and current_price > 0:
+                    # 市价买入，JQ笼子机制自动限制成交价在上限内
+                    order_result = order(code, shares)
                     if order_result is not None and _check_order_filled(context, code):
                         signal['first_leg_done'] = True
                         signal['second_leg_done'] = True  # 单腿完成
-                        log.debug(f"[TYPE_A] {code} 笼子上限挂单买入 {shares} 股，挂单价 {high_limit:.2f}")
+                        log.info(f"[TYPE_A] {code} 市价买入 {shares} 股，笼子上限 {high_limit:.2f}")
                         _record_holding(context, code, signal, shares, leg='full')
                         return True
                     else:
-                        log.debug(f"[TYPE_A] {code} 笼子上限挂单未成交")
+                        log.info(f"[TYPE_A] {code} 市价买入未成交")
                 else:
-                    log.debug(f"[TYPE_A] {code} 无法获取笼子上限价格")
+                    log.info(f"[TYPE_A] {code} 无法获取当前价格")
             except Exception as e:
                 log.info(f"[TYPE_A] {code} 笼子上限挂单失败: {e}")
         return False
@@ -2286,15 +2288,16 @@ def execute_type_c(context, data, code: str, signal: Dict) -> bool:
         shares = calc_position_size(context, code, ratio=0.5)
         if shares > 0:
             try:
-                order_result = order(code, shares, style=LimitOrder(auction_price))
+                # 市价买入（首tick时市价≈集合竞价价格）
+                order_result = order(code, shares)
                 if order_result is not None and _check_order_filled(context, code):
                     signal['first_leg_done'] = True
-                    log.debug(f"[TYPE_C] {code} 集合竞价买入 {shares} 股，竞价 {auction_price:.2f}")
+                    log.info(f"[TYPE_C] {code} 集合竞价买入 {shares} 股，竞价 {auction_price:.2f}")
                     _record_holding(context, code, signal, shares, leg='first')
                     return True
                 else:
                     signal['first_leg_done'] = True  # 标记已尝试，进入第二腿
-                    log.debug(f"[TYPE_C] {code} 集合竞价未成交，进入第二腿 ({signal['second_leg_type']})")
+                    log.info(f"[TYPE_C] {code} 集合竞价未成交，进入第二腿 ({signal['second_leg_type']})")
             except Exception as e:
                 log.info(f"[TYPE_C] {code} 集合竞价挂单失败: {e}")
                 return False
