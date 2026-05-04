@@ -22,6 +22,7 @@
 # - 移动止盈 (从最高价回撤 > 3%)
 # - 达到目标价
 #
+#
 # ## 止损条件（任一触发）
 # - 日内亏损 > 5%
 # - 崩盘检测 (涨跌比 < 1:4)
@@ -35,8 +36,16 @@ import pandas as pd
 import numpy as np
 import datetime as dt
 from datetime import datetime, timedelta
+from typing import Optional, Dict, List, Tuple
+import traceback
 import warnings
 warnings.filterwarnings('ignore')
+
+# scipy.stats for IC calculation (Spearman correlation)
+try:
+    from scipy import stats
+except ImportError:
+    stats = None  # IC监控功能将不可用
 
 # JoinQuant 环境导入
 try:
@@ -59,13 +68,13 @@ STRATEGY_CONFIG = {
     'max_entry_count': 5,           # 每日最大建仓数
     'max_holdings': 5,              # 最大同时持仓数
     'zt_count_threshold': 30,       # 昨日ZT数<=此值则不交易
-    'min_score': 50,                # 建仓最低评分 (可配置)
-    'min_entry_index': 65,          # 建仓最低建仓指数 (可配置)
+    'min_score': 40,                # 建仓最低评分 (可配置, 8维模型分数分布更分散)
+    'min_entry_index': 55,          # 建仓最低建仓指数 (可配置, 与"适度建仓"信号阈值对齐)
 
     # --- 止盈 ---
     'max_hold_days': 5,             # 最大持仓天数
     't1_profit_take_pct': 0.09,     # T+1利润>9%止盈
-    'trailing_stop_pct': 0.03,      # 从最高价回撤3%移动止盈
+    'trailing_stop_pct': 0.04,      # 从最高价回撤4%移动止盈（让利润奔跑）
 
     # --- 止损 ---
     'daily_stop_loss_pct': 0.05,    # 日内亏损>5%止损
@@ -90,15 +99,12 @@ STRATEGY_CONFIG = {
         'capital_flow': 15,
         'fundamental': 10,
         'risk_deduction': 5,
+        'alpha_factors': 5,         # 量价背离/波动率 Alpha 信号
+        'zt_exclusive': 5,          # 涨停板专属因子
     },
     'defense_line': -0.03,
     'zt_threshold': 9.8,
     'N_days': [1, 2, 3, 4, 5],
-
-    # --- 涨停后建仓日分析 ---
-    'post_zt_max_track_days': 10,       # ZT后最多跟踪天数
-    'post_zt_hold_days': [1, 2, 3, 4, 5],  # 持仓天数分析维度
-    'post_zt_log_interval': 20,         # 每N个交易日输出一次分析
 }
 
 
@@ -106,7 +112,7 @@ STRATEGY_CONFIG = {
 # Section 3: 工具函数 (从 zt_analysis.py 复用)
 # ============================================================================
 
-def _safe_series(df, col):
+def _safe_series(df: pd.DataFrame, col: str) -> pd.Series:
     """
     安全地从 DataFrame 获取一列作为 Series。
     处理重复列名导致 df[col] 返回 DataFrame 的情况。
@@ -120,7 +126,7 @@ def _safe_series(df, col):
     return s
 
 
-def _safe_get(df, col, default=np.nan):
+def _safe_get(df: pd.DataFrame, col: str, default: Optional[float] = np.nan) -> Optional[float]:
     """
     类似 df.get(col, default)，但处理重复列名。
     列不存在时返回 default，存在时返回首个 Series。
@@ -133,12 +139,12 @@ def _safe_get(df, col, default=np.nan):
     return s
 
 
-def _dedup_columns(df):
+def _dedup_columns(df: pd.DataFrame) -> pd.DataFrame:
     """去除重复列名，保留首次出现的列。"""
     return df.loc[:, ~df.columns.duplicated()]
 
 
-def _normalize_jq_code(code_str):
+def _normalize_jq_code(code_str: str) -> str:
     """
     将各种格式的股票代码标准化为 JoinQuant 格式。
     例: '000001' → '000001.XSHE', '600000' → '600000.XSHG'
@@ -159,7 +165,7 @@ def _normalize_jq_code(code_str):
         return f"{code_str}.XSHE"
 
 
-def _normalize_price_df_time(price_df):
+def _normalize_price_df_time(price_df: pd.DataFrame) -> pd.DataFrame:
     """
     兼容不同版本 JoinQuant / pandas 的 get_price 返回格式。
     确保返回的 DataFrame 有一个 'time' 列（datetime 类型）。
@@ -194,7 +200,7 @@ def _normalize_price_df_time(price_df):
 # Section 4: 涨停股筛选与过滤
 # ============================================================================
 
-def get_yesterday_zt_stocks(context):
+def get_yesterday_zt_stocks(context) -> pd.DataFrame:
     """
     获取昨日涨停股列表。
 
@@ -242,8 +248,11 @@ def get_yesterday_zt_stocks(context):
 
     price_df = pd.concat(all_prices, ignore_index=True)
 
-    # 筛选涨停股 (涨幅 >= zt_threshold)
-    zt_df = price_df[price_df['pct_change'] >= STRATEGY_CONFIG['zt_threshold']].copy()
+    # 筛选涨停股 (涨幅 >= zt_threshold 且 收盘价=最高价，即封涨停)
+    zt_df = price_df[
+        (price_df['pct_change'] >= STRATEGY_CONFIG['zt_threshold']) &
+        (price_df['close'] == price_df['high'])
+    ].copy()
 
     if zt_df.empty:
         return pd.DataFrame()
@@ -279,7 +288,7 @@ def get_yesterday_zt_stocks(context):
     return result
 
 
-def filter_stocks(context, stock_codes):
+def filter_stocks(context, stock_codes: List[str]) -> List[str]:
     """
     过滤ST股和上市不足3个月的股票。
 
@@ -348,7 +357,7 @@ def filter_stocks(context, stock_codes):
 # Section 5: 股票池管理
 # ============================================================================
 
-def update_stock_pool(context, new_zt_df):
+def update_stock_pool(context, new_zt_df: pd.DataFrame) -> None:
     """
     将新ZT股加入股票池，去重。如果股票已在池中且再次涨停，更新ZT信息。
 
@@ -363,39 +372,47 @@ def update_stock_pool(context, new_zt_df):
 
     pool = g.stock_pool
 
-    for idx, row in new_zt_df.iterrows():
-        code = row.get('jq_code', '')
-        if code in pool['jq_code'].values:
-            # 更新已有股票的ZT信息 (再次涨停)
-            pool_idx = pool[pool['jq_code'] == code].index[0]
-            pool.at[pool_idx, 'zt_date'] = row.get('zt_date')
-            pool.at[pool_idx, 'zt_close'] = row.get('zt_close')
-            pool.at[pool_idx, 'pct_change'] = row.get('pct_change', 0)
+    # ---- 批量更新：分离已有股票和新增股票 ----
+    existing_codes = set(pool['jq_code'].values)
+    update_cols = ['zt_date', 'zt_close', 'pct_change']
+
+    # 已有股票：批量 loc 更新
+    existing_mask = new_zt_df['jq_code'].isin(existing_codes)
+    existing_updates = new_zt_df[existing_mask]
+
+    if not existing_updates.empty:
+        for _, row in existing_updates.iterrows():
+            code = row.get('jq_code', '')
+            pool_idx = pool.index[pool['jq_code'] == code][0]
+            for col in update_cols:
+                pool.at[pool_idx, col] = row.get(col, np.nan if col != 'pct_change' else 0)
             log.info(f"[update_stock_pool] 更新 {code} ZT信息 (再次涨停)")
-        else:
-            # 新增股票
-            new_row = pd.DataFrame([{
-                'jq_code': code,
-                'code': row.get('code', ''),
-                'name': row.get('name', ''),
-                'zt_date': row.get('zt_date'),
-                'zt_close': row.get('zt_close', np.nan),
-                'pct_change': row.get('pct_change', 0),
-                'total_score': np.nan,
-                'classification': '',
-                'signal': '',
-                'entry_index': np.nan,
-                'buy_price': np.nan,
-                'stop_loss': np.nan,
-                'target_price': np.nan,
-            }])
-            pool = pd.concat([pool, new_row], ignore_index=True)
+
+    # 新增股票：批量 concat
+    new_stocks = new_zt_df[~existing_mask]
+    if not new_stocks.empty:
+        new_rows = pd.DataFrame({
+            'jq_code': new_stocks['jq_code'].values,
+            'code': new_stocks.get('code', '').values,
+            'name': new_stocks.get('name', '').values,
+            'zt_date': new_stocks.get('zt_date', np.nan).values,
+            'zt_close': new_stocks.get('zt_close', np.nan).values,
+            'pct_change': new_stocks.get('pct_change', 0).values,
+            'total_score': np.nan,
+            'classification': '',
+            'signal': '',
+            'entry_index': np.nan,
+            'buy_price': np.nan,
+            'stop_loss': np.nan,
+            'target_price': np.nan,
+        })
+        pool = pd.concat([pool, new_rows], ignore_index=True)
 
     g.stock_pool = pool
     log.info(f"[update_stock_pool] 股票池更新后大小: {len(g.stock_pool)}")
 
 
-def prune_stock_pool(context):
+def prune_stock_pool(context) -> None:
     """
     按规则淘汰股票池中的股票。
 
@@ -492,7 +509,7 @@ def prune_stock_pool(context):
 # Section 6: 数据获取与因子计算
 # ============================================================================
 
-def build_stock_data(context, pool_df):
+def build_stock_data(context, pool_df: pd.DataFrame) -> pd.DataFrame:
     """
     为股票池中的股票构建分析数据。
     整合了 zt_analysis.py 中 get_price_data + supplement_jq_data 的逻辑。
@@ -713,12 +730,20 @@ def build_stock_data(context, pool_df):
     return df
 
 
-def _supplement_jq_data_strategy(context, df):
+def _supplement_jq_data_strategy(context, df: pd.DataFrame) -> pd.DataFrame:
     """
     补充基本面、资金流向等数据 (策略版)。
     仅填充 NaN 的字段，不覆盖已有数据。
     """
     yesterday = context.previous_date
+
+    # ---- 预初始化可能缺失的列，防止后续 classify_stock() 等函数 KeyError ----
+    for _col in ['main_net_inflow', 'main_net_pct', 'turnover_rate',
+                 'pe_ttm', 'pb_ratio', 'market_cap', 'float_market_cap',
+                 'eps', 'roe', 'roa', 'gross_margin',
+                 'revenue_yoy', 'profit_yoy', 'debt_ratio']:
+        if _col not in df.columns:
+            df[_col] = np.nan
 
     for idx, row in df.iterrows():
         jq_code = row.get('jq_code', '')
@@ -822,7 +847,7 @@ def _supplement_jq_data_strategy(context, df):
 # Section 7: 因子计算 (从 zt_analysis.py 复用)
 # ============================================================================
 
-def calc_factors(price_df):
+def calc_factors(price_df: pd.DataFrame) -> pd.DataFrame:
     """
     计算多维度因子，为评分模型提供输入。
 
@@ -908,6 +933,174 @@ def calc_factors(price_df):
     df['factor_days_boards'] = _safe_get(df, 'days_boards', np.nan)
     df['factor_first_zt_time'] = _safe_get(df, 'first_zt_time', np.nan)
 
+    # ---- 4.8 互补 Alpha 因子 (WorldQuant 101 Alphas 精选) ----
+    # Alpha#6: -1 * correlation(open, volume, 10)
+    # 量价背离检测：开盘价与成交量的相关性，负相关表示量价背离（看跌信号）
+    if all(c in df.columns for c in ['open', 'volume']):
+        _open = _safe_series(df, 'open').astype(float, errors='ignore')
+        _vol_s = _safe_series(df, 'volume').astype(float, errors='ignore')
+        try:
+            df['factor_alpha6'] = -1 * _open.rolling(window=10, min_periods=6).corr(_vol_s)
+        except Exception:
+            df['factor_alpha6'] = np.nan
+    else:
+        df['factor_alpha6'] = np.nan
+
+    # Alpha#12: sign(delta(volume, 1)) * (-1 * delta(close, 1))
+    # 量增价跌/量缩价涨的短期反转信号
+    if all(c in df.columns for c in ['close', 'volume']):
+        _close_s = _safe_series(df, 'close').astype(float, errors='ignore')
+        _vol_s2 = _safe_series(df, 'volume').astype(float, errors='ignore')
+        try:
+            _delta_vol = _vol_s2.diff(1)
+            _delta_close = _close_s.diff(1)
+            df['factor_alpha12'] = np.sign(_delta_vol) * (-1 * _delta_close)
+        except Exception:
+            df['factor_alpha12'] = np.nan
+    else:
+        df['factor_alpha12'] = np.nan
+
+    # Alpha#33: rank(-1 * (1 - (open / close)))
+    # 日内反转：开盘价相对收盘价的位置，rank标准化
+    if all(c in df.columns for c in ['open', 'close']):
+        _open2 = _safe_series(df, 'open').astype(float, errors='ignore').replace(0, np.nan)
+        _close2 = _safe_series(df, 'close').astype(float, errors='ignore')
+        try:
+            _intraday_ret = 1 - (_open2 / _close2)
+            df['factor_alpha33'] = _intraday_ret.rank(pct=True) * -1
+        except Exception:
+            df['factor_alpha33'] = np.nan
+    else:
+        df['factor_alpha33'] = np.nan
+
+    # Alpha#54: -1 * ((low - close) * (low^5)) / ((low - high) * (close^5))
+    # 日内价格位置加权：衡量收盘价在日内区间中的位置，低收时放大信号
+    if all(c in df.columns for c in ['low', 'close', 'high']):
+        _low = _safe_series(df, 'low').astype(float, errors='ignore').replace(0, np.nan)
+        _close3 = _safe_series(df, 'close').astype(float, errors='ignore').replace(0, np.nan)
+        _high = _safe_series(df, 'high').astype(float, errors='ignore')
+        try:
+            _numerator = (_low - _close3) * (_low ** 5)
+            _denominator = (_low - _high).replace(0, np.nan) * (_close3 ** 5)
+            df['factor_alpha54'] = -1 * _numerator / _denominator
+            df['factor_alpha54'] = df['factor_alpha54'].replace([np.inf, -np.inf], np.nan)
+        except Exception:
+            df['factor_alpha54'] = np.nan
+    else:
+        df['factor_alpha54'] = np.nan
+
+    # Alpha#41: (high - low) / close 的滚动均值 — 波动率因子
+    if all(c in df.columns for c in ['high', 'low', 'close']):
+        _high2 = _safe_series(df, 'high').astype(float, errors='ignore')
+        _low2 = _safe_series(df, 'low').astype(float, errors='ignore')
+        _close4 = _safe_series(df, 'close').astype(float, errors='ignore').replace(0, np.nan)
+        try:
+            _range_ratio = (_high2 - _low2) / _close4
+            df['factor_alpha41'] = _range_ratio.rolling(window=5, min_periods=3).mean()
+        except Exception:
+            df['factor_alpha41'] = np.nan
+    else:
+        df['factor_alpha41'] = np.nan
+
+    # Alpha#49: sum(((high+close)/2 - (low+close)/2)^2, 5) / (5*volume)
+    # 日内振幅的平方和归一化 — 波动率/成交量比
+    if all(c in df.columns for c in ['high', 'low', 'close', 'volume']):
+        _high3 = _safe_series(df, 'high').astype(float, errors='ignore')
+        _low3 = _safe_series(df, 'low').astype(float, errors='ignore')
+        _close5 = _safe_series(df, 'close').astype(float, errors='ignore')
+        _vol_s3 = _safe_series(df, 'volume').astype(float, errors='ignore').replace(0, np.nan)
+        try:
+            _half_spread = ((_high3 + _close5) / 2 - (_low3 + _close5) / 2) ** 2
+            df['factor_alpha49'] = _half_spread.rolling(window=5, min_periods=3).sum() / (5 * _vol_s3)
+            df['factor_alpha49'] = df['factor_alpha49'].replace([np.inf, -np.inf], np.nan)
+        except Exception:
+            df['factor_alpha49'] = np.nan
+    else:
+        df['factor_alpha49'] = np.nan
+
+    # ---- 4.9 涨停板专属因子 ----
+    # 封板速度: 首次涨停时间越早，封板越坚决，预测力越强
+    # 将 HH:MM 时间转换为分钟数（09:30=0, 15:00=330），越早值越大
+    if 'first_zt_time' in df.columns:
+        _zt_time = _safe_series(df, 'first_zt_time')
+        try:
+            def _parse_zt_time_to_minutes(val) -> Optional[float]:
+                """将涨停时间字符串转为距开盘的分钟数，越早封板值越大"""
+                if pd.isna(val) or not isinstance(val, str) or ':' not in val:
+                    return np.nan
+                try:
+                    parts = val.strip().split(':')
+                    hour, minute = int(parts[0]), int(parts[1])
+                    total_minutes = hour * 60 + minute
+                    open_minutes = 9 * 60 + 30  # 09:30 开盘
+                    elapsed = total_minutes - open_minutes
+                    if elapsed < 0:
+                        elapsed = 0  # 集合竞价涨停
+                    return float(elapsed)
+                except (ValueError, IndexError):
+                    return np.nan
+
+            _elapsed_minutes = _zt_time.apply(_parse_zt_time_to_minutes)
+            # 反转：越早封板，factor_seal_speed 越大 (330-elapsed)
+            df['factor_seal_speed'] = 330.0 - _elapsed_minutes
+            df.loc[_elapsed_minutes.isna(), 'factor_seal_speed'] = np.nan
+        except Exception:
+            df['factor_seal_speed'] = np.nan
+    else:
+        df['factor_seal_speed'] = np.nan
+
+    # 开板次数: 已有 factor_zt_open_count，此处增加二次确认
+    # (0次=一字板/秒板，1次=开过1次，2+次=弱势)
+    # factor_zt_open_count 已在 4.6 中定义，此处不再重复
+
+    # 涨停板类型: 基于连板天数分类 (首板=0, 2连板=1, 3+连板=2)
+    if 'days_boards' in df.columns:
+        _db = _safe_series(df, 'days_boards').astype(float, errors='ignore')
+        try:
+            # 解析 "几天几板" 格式，取连板数
+            def _parse_days_boards(val) -> Optional[float]:
+                """解析连板数，如 '2天2板' -> 2, '昨日首板' -> 1"""
+                if pd.isna(val):
+                    return np.nan
+                if isinstance(val, (int, float)):
+                    return float(val)
+                val_str = str(val).strip()
+                # 尝试匹配 "N天N板" 格式
+                import re
+                m = re.search(r'(\d+)天.*?(\d+)板', val_str)
+                if m:
+                    return float(m.group(2))
+                # "昨日首板" / "首板" -> 1
+                if '首板' in val_str:
+                    return 1.0
+                # 纯数字
+                try:
+                    return float(val_str)
+                except ValueError:
+                    return np.nan
+
+            _board_count = _db.apply(_parse_days_boards)
+            df['factor_zt_board_type'] = 0.0  # 首板
+            df.loc[_board_count >= 2, 'factor_zt_board_type'] = 1.0  # 连板
+            df.loc[_board_count >= 3, 'factor_zt_board_type'] = 2.0  # 多连板
+            df.loc[_board_count.isna(), 'factor_zt_board_type'] = np.nan
+        except Exception:
+            df['factor_zt_board_type'] = np.nan
+    else:
+        df['factor_zt_board_type'] = np.nan
+
+    # 封流比: 封单金额 / 流通市值 — 封板强度相对流通盘的占比
+    if 'seal_amount' in df.columns and 'float_market_cap' in df.columns:
+        _seal = _safe_series(df, 'seal_amount').astype(float, errors='ignore')
+        _float_mcap = _safe_series(df, 'float_market_cap').astype(float, errors='ignore').replace(0, np.nan)
+        try:
+            df['factor_seal_float_ratio'] = _seal / _float_mcap
+            df['factor_seal_float_ratio'] = df['factor_seal_float_ratio'].replace([np.inf, -np.inf], np.nan)
+        except Exception:
+            df['factor_seal_float_ratio'] = np.nan
+    else:
+        df['factor_seal_float_ratio'] = np.nan
+
     return df
 
 
@@ -915,7 +1108,7 @@ def calc_factors(price_df):
 # Section 8: 股票分类 (从 zt_analysis.py 复用，适配 STRATEGY_CONFIG)
 # ============================================================================
 
-def classify_stock(factor_df):
+def classify_stock(factor_df: pd.DataFrame) -> pd.DataFrame:
     """
     根据多维度条件将股票分为强势/平稳/弱势。
 
@@ -927,76 +1120,43 @@ def classify_stock(factor_df):
     df = factor_df.copy()
     df['classification'] = '平稳'  # 默认平稳
 
-    for idx, row in df.iterrows():
-        # ---- 强势股条件 ----
-        ratio_above_zt = row.get('ratio_above_zt', 0)
-        if pd.isna(ratio_above_zt):
-            ratio_above_zt = 0
+    # ---- 向量化分类 (替代逐行 iterrows+at[]) ----
+    # 使用 _safe_series() 防止列不存在时 KeyError 崩溃整个管线
+    _ratio_zt = _safe_series(df, 'ratio_above_zt').fillna(0).astype(float)
+    _max_dd = _safe_series(df, 'overall_max_drawdown').fillna(0).astype(float)
+    _vol_ratio = _safe_series(df, 'vol_ratio').fillna(1).astype(float)
+    _main_net = _safe_series(df, 'main_net_inflow').fillna(0).astype(float)
+    _turnover = _safe_series(df, 'turnover_rate').fillna(0).astype(float)
+    _consec_up = _safe_series(df, 'consecutive_up').fillna(0).astype(float)
+    _return_n1 = _safe_series(df, 'return_n1').fillna(0).astype(float)
 
-        max_dd = row.get('overall_max_drawdown', 0)
-        if pd.isna(max_dd):
-            max_dd = 0
-        not_break_defense = max_dd > STRATEGY_CONFIG['defense_line']
+    _not_break_defense = _max_dd > STRATEGY_CONFIG['defense_line']
+    _vol_stable = _vol_ratio >= 0.8
+    _main_positive = _main_net >= 0
+    _turnover_active = _turnover >= 3
+    _high_consec = _consec_up >= 2
 
-        vol_ratio = row.get('vol_ratio', 1)
-        if pd.isna(vol_ratio):
-            vol_ratio = 1
-        vol_stable = vol_ratio >= 0.8
+    # 强势评分
+    strong_score = pd.Series(0, index=df.index, dtype=float)
+    strong_score += ((_ratio_zt > 0.6).astype(int) * 2 + (_ratio_zt > 0.4).astype(int) * 1)
+    strong_score = strong_score.clip(upper=2)  # 最多2分
+    strong_score += _not_break_defense.astype(int) * 2
+    strong_score += _vol_stable.astype(int) * 1
+    strong_score += _main_positive.astype(int) * 1
+    strong_score += _turnover_active.astype(int) * 1
+    strong_score += _high_consec.astype(int) * 1
 
-        main_net = row.get('main_net_inflow', 0)
-        if pd.isna(main_net):
-            main_net = 0
-        main_positive = main_net >= 0
+    # 弱势评分
+    weak_score = pd.Series(0, index=df.index, dtype=float)
+    weak_score += (_ratio_zt < 0.3).astype(int) * 2
+    weak_score += (~_not_break_defense).astype(int) * 2
+    weak_score += ((_return_n1 < 0) & (_vol_ratio > 1.5)).astype(int) * 2
+    weak_score += (_main_net < 0).astype(int) * 1
 
-        turnover = row.get('turnover_rate', 0)
-        if pd.isna(turnover):
-            turnover = 0
-        turnover_active = turnover >= 3
-
-        consec_up = row.get('consecutive_up', 0)
-        if pd.isna(consec_up):
-            consec_up = 0
-        high_consec = consec_up >= 2
-
-        # 强势评分
-        strong_score = 0
-        if ratio_above_zt > 0.6:
-            strong_score += 2
-        elif ratio_above_zt > 0.4:
-            strong_score += 1
-        if not_break_defense:
-            strong_score += 2
-        if vol_stable:
-            strong_score += 1
-        if main_positive:
-            strong_score += 1
-        if turnover_active:
-            strong_score += 1
-        if high_consec:
-            strong_score += 1
-
-        # ---- 弱势股条件 ----
-        weak_score = 0
-        if ratio_above_zt < 0.3:
-            weak_score += 2
-        if not not_break_defense:
-            weak_score += 2
-
-        return_n1 = row.get('return_n1', 0)
-        if pd.isna(return_n1):
-            return_n1 = 0
-        if return_n1 < 0 and vol_ratio > 1.5:
-            weak_score += 2
-        if main_net < 0:
-            weak_score += 1
-
-        # ---- 分类 ----
-        if strong_score >= 5:
-            df.at[idx, 'classification'] = '强势'
-        elif weak_score >= 4:
-            df.at[idx, 'classification'] = '弱势'
-        else:
-            df.at[idx, 'classification'] = '平稳'
+    # 分类
+    df['classification'] = '平稳'
+    df.loc[strong_score >= 5, 'classification'] = '强势'
+    df.loc[weak_score >= 4, 'classification'] = '弱势'
 
     return df
 
@@ -1005,7 +1165,7 @@ def classify_stock(factor_df):
 # Section 9: 评分模型 (从 zt_analysis.py 复用)
 # ============================================================================
 
-def score_stock(factor_df):
+def score_stock(factor_df: pd.DataFrame) -> pd.DataFrame:
     """
     构建评分模型，对每只股票打分（0~100）。
 
@@ -1016,6 +1176,8 @@ def score_stock(factor_df):
       4. 资金（15分）
       5. 基本面（10分）
       6. 风险扣分（5分）
+      7. Alpha因子（5分）— 量价背离/波动率信号
+      8. 涨停板专属（5分）— 封板速度/涨停板类型/封流比
     """
     df = factor_df.copy()
     scores = []
@@ -1267,9 +1429,61 @@ def score_stock(factor_df):
         if amp > 10:
             risk_deduction += 1
 
+        # ======== 7. Alpha因子（5分）========
+        alpha_score = 0
+
+        # 7a. Alpha#6 量价背离（2分）
+        alpha6 = row.get('factor_alpha6', np.nan)
+        if not pd.isna(alpha6):
+            if alpha6 < -0.3:
+                alpha_score += 2   # 量价背离明显（看跌信号反转后偏多）
+            elif alpha6 < -0.1:
+                alpha_score += 1
+
+        # 7b. Alpha#12 短期反转（2分）
+        alpha12 = row.get('factor_alpha12', np.nan)
+        if not pd.isna(alpha12):
+            if alpha12 > 0:
+                alpha_score += 2   # 量缩价涨（偏多）
+            elif alpha12 > -0.5:
+                alpha_score += 1
+
+        # 7c. Alpha#41 波动率（1分）
+        alpha41 = row.get('factor_alpha41', np.nan)
+        if not pd.isna(alpha41):
+            if 0.02 < alpha41 < 0.05:
+                alpha_score += 1   # 适度波动
+            # 过高或过低不加分
+
+        # ======== 8. 涨停板专属（5分）========
+        zt_exclusive_score = 0
+
+        # 8a. 封板速度（2分）
+        seal_speed = row.get('factor_seal_speed', np.nan)
+        if not pd.isna(seal_speed):
+            if seal_speed >= 300:   # 开盘30分钟内封板
+                zt_exclusive_score += 2
+            elif seal_speed >= 200:  # 上午封板
+                zt_exclusive_score += 1
+
+        # 8b. 涨停板类型（2分）
+        board_type = row.get('factor_zt_board_type', np.nan)
+        if not pd.isna(board_type):
+            if board_type >= 2:     # 多连板
+                zt_exclusive_score += 2
+            elif board_type >= 1:   # 连板
+                zt_exclusive_score += 1
+
+        # 8c. 封流比（1分）
+        seal_float = row.get('factor_seal_float_ratio', np.nan)
+        if not pd.isna(seal_float):
+            if seal_float > 0.05:
+                zt_exclusive_score += 1   # 封单占流通盘5%以上
+
         # ======== 总分 ========
         total_score = (price_score + trend_score + vol_score +
-                       capital_score + fund_score - risk_deduction)
+                       capital_score + fund_score - risk_deduction +
+                       alpha_score + zt_exclusive_score)
         total_score = max(0, min(100, total_score))
 
         scores.append({
@@ -1279,6 +1493,8 @@ def score_stock(factor_df):
             'capital_score': capital_score,
             'fund_score': fund_score,
             'risk_deduction': risk_deduction,
+            'alpha_score': alpha_score,
+            'zt_exclusive_score': zt_exclusive_score,
             'total_score': total_score,
         })
 
@@ -1296,7 +1512,7 @@ def score_stock(factor_df):
 # Section 10: 次日建仓预测 (从 zt_analysis.py 复用)
 # ============================================================================
 
-def predict_next_day(scored_df):
+def predict_next_day(scored_df: pd.DataFrame) -> pd.DataFrame:
     """
     基于当前收盘情况，预测未来一天可建仓的股票。
 
@@ -1317,11 +1533,11 @@ def predict_next_day(scored_df):
     predict_scores = []
 
     for idx, row in candidates.iterrows():
-        # === 1. 综合评分权重 (40分) ===
+        # === 1. 综合评分权重 (35分) ===
         total_score = row.get('total_score', 0)
         if pd.isna(total_score):
             total_score = 0
-        score_component = min(total_score / 100 * 40, 40)
+        score_component = min(total_score / 100 * 35, 35)
 
         # === 2. 价格位置权重 (20分) ===
         price_component = 0
@@ -1358,22 +1574,27 @@ def predict_next_day(scored_df):
         # === 4. 资金面权重 (15分) ===
         capital_component = 0
         main_net = row.get('main_net_inflow', 0)
-        if pd.isna(main_net):
+        main_net_is_nan = pd.isna(main_net)
+        if main_net_is_nan:
             main_net = 0
         main_pct = row.get('main_net_pct', 0)
-        if pd.isna(main_pct):
+        main_pct_is_nan = pd.isna(main_pct)
+        if main_pct_is_nan:
             main_pct = 0
 
-        if main_net > 0 and main_pct > 0:
+        # 数据缺失时给中性分数(10/15)，避免因API失败惩罚整个建仓指数
+        if main_net_is_nan and main_pct_is_nan:
+            capital_component = 10  # 数据缺失=中性
+        elif main_net > 0 and main_pct > 0:
             capital_component = 15
         elif main_net > 0:
-            capital_component = 10
+            capital_component = 12
         elif main_net > -5e7:
-            capital_component = 6
+            capital_component = 8
         else:
             capital_component = 2
 
-        # === 5. 涨停特征权重 (10分) ===
+        # === 5. 涨停特征权重 (5分) ===
         zt_feature_component = 0
         seal_ratio = row.get('seal_volume_ratio', 0)
         if pd.isna(seal_ratio):
@@ -1386,26 +1607,112 @@ def predict_next_day(scored_df):
             consec_up = 0
 
         if seal_ratio > 5:
-            zt_feature_component += 4
+            zt_feature_component += 2
         elif seal_ratio > 2:
-            zt_feature_component += 3
+            zt_feature_component += 1.5
         elif seal_ratio > 0:
-            zt_feature_component += 2
-
-        if zt_open == 0:
-            zt_feature_component += 4
-        elif zt_open == 1:
-            zt_feature_component += 2
-
-        if consec_up >= 3:
-            zt_feature_component += 2
-        elif consec_up >= 2:
             zt_feature_component += 1
 
-        zt_feature_component = min(zt_feature_component, 10)
+        if zt_open == 0:
+            zt_feature_component += 2
+        elif zt_open == 1:
+            zt_feature_component += 1
+
+        if consec_up >= 3:
+            zt_feature_component += 1
+        elif consec_up >= 2:
+            zt_feature_component += 0.5
+
+        zt_feature_component = min(zt_feature_component, 5)
+
+        # === 6. Alpha因子权重 (5分) ===
+        alpha_component = 0
+        _alpha6 = row.get('factor_alpha6', 0)
+        if pd.isna(_alpha6):
+            _alpha6 = 0
+        _alpha12 = row.get('factor_alpha12', 0)
+        if pd.isna(_alpha12):
+            _alpha12 = 0
+        _alpha41 = row.get('factor_alpha41', 0)
+        if pd.isna(_alpha41):
+            _alpha41 = 0
+
+        # Alpha#6: 量价背离 — 负相关越强(值越负)越看多
+        if _alpha6 < -0.3:
+            alpha_component += 2
+        elif _alpha6 < -0.1:
+            alpha_component += 1.5
+        elif _alpha6 < 0.1:
+            alpha_component += 1
+        else:
+            alpha_component += 0
+
+        # Alpha#12: 短期反转 — 正值表示量增价跌反转信号
+        if _alpha12 > 0.02:
+            alpha_component += 2
+        elif _alpha12 > 0:
+            alpha_component += 1
+        elif _alpha12 > -0.02:
+            alpha_component += 0.5
+        else:
+            alpha_component += 0
+
+        # Alpha#41: 波动率 — 适度波动率最佳
+        if 0.02 <= _alpha41 <= 0.05:
+            alpha_component += 1
+        elif 0.01 <= _alpha41 <= 0.08:
+            alpha_component += 0.5
+        else:
+            alpha_component += 0
+
+        alpha_component = min(alpha_component, 5)
+
+        # === 7. 涨停板专属因子权重 (5分) ===
+        zt_exclusive_component = 0
+        _seal_speed = row.get('factor_seal_speed', 0)
+        if pd.isna(_seal_speed):
+            _seal_speed = 0
+        _board_type = row.get('factor_zt_board_type', 0)
+        if pd.isna(_board_type):
+            _board_type = 0
+        _seal_float = row.get('factor_seal_float_ratio', 0)
+        if pd.isna(_seal_float):
+            _seal_float = 0
+
+        # 封板速度: 值越大表示封板越早 (330=开盘即封, 0=尾盘封)
+        if _seal_speed >= 300:
+            zt_exclusive_component += 2
+        elif _seal_speed >= 240:
+            zt_exclusive_component += 1.5
+        elif _seal_speed >= 120:
+            zt_exclusive_component += 1
+        else:
+            zt_exclusive_component += 0.5
+
+        # 涨停板类型: 2=多连板 > 1=连板 > 0=首板
+        if _board_type >= 2:
+            zt_exclusive_component += 2
+        elif _board_type >= 1:
+            zt_exclusive_component += 1.5
+        else:
+            zt_exclusive_component += 0.5
+
+        # 封流比: 封单金额/流通市值, 越高封板越稳
+        if _seal_float >= 0.05:
+            zt_exclusive_component += 1
+        elif _seal_float >= 0.02:
+            zt_exclusive_component += 0.7
+        elif _seal_float >= 0.005:
+            zt_exclusive_component += 0.3
+        else:
+            zt_exclusive_component += 0
+
+        zt_exclusive_component = min(zt_exclusive_component, 5)
 
         # === 汇总建仓指数 ===
-        entry_index = score_component + price_component + defense_component + capital_component + zt_feature_component
+        entry_index = (score_component + price_component + defense_component
+                       + capital_component + zt_feature_component
+                       + alpha_component + zt_exclusive_component)
         entry_index = max(0, min(100, entry_index))
 
         # === 计算建议买入价、止损价、目标价 ===
@@ -1450,6 +1757,8 @@ def predict_next_day(scored_df):
             'defense_component': defense_component,
             'capital_component': capital_component,
             'zt_feature_component': zt_feature_component,
+            'alpha_component': alpha_component,
+            'zt_exclusive_component': zt_exclusive_component,
             'buy_price': round(buy_price, 2) if not pd.isna(buy_price) else np.nan,
             'stop_loss': round(stop_loss, 2) if not pd.isna(stop_loss) else np.nan,
             'target_price': round(target_price, 2) if not pd.isna(target_price) else np.nan,
@@ -1471,14 +1780,14 @@ def predict_next_day(scored_df):
 # Section 11: 建仓信号生成
 # ============================================================================
 
-def generate_entry_signals(context, predict_df):
+def generate_entry_signals(context, predict_df: pd.DataFrame) -> Dict:
     """
     根据分类+信号生成4类建仓信号。
 
     信号映射:
-    - 强势 + 积极建仓 → TYPE_A (开盘50% + MA5回踩50%)
-    - 平稳 + 积极建仓 → TYPE_B (10点后金叉全仓)
-    - 强势 + 适度建仓 → TYPE_C (10点后金叉半仓 + MA5/MA10半仓)
+    - 强势 + 积极建仓 → TYPE_A (开盘100%笼子上限挂单)
+    - 平稳 + 积极建仓 → TYPE_B (10点后金叉70% + MA5/MA10补30%)
+    - 强势 + 适度建仓 → TYPE_C (9:26集合竞价50% + 条件分支)
     - 其他 → NO_ENTRY
 
     Parameters
@@ -1577,7 +1886,7 @@ def generate_entry_signals(context, predict_df):
 # Section 12: 技术指标
 # ============================================================================
 
-def calc_macd(close_series, fast=12, slow=26, signal_period=9):
+def calc_macd(close_series: pd.Series, fast: int = 12, slow: int = 26, signal_period: int = 9) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """
     计算 MACD 指标。
 
@@ -1594,7 +1903,7 @@ def calc_macd(close_series, fast=12, slow=26, signal_period=9):
     return dif, dea, macd_hist
 
 
-def calc_kdj(high_series, low_series, close_series, n=9, m1=3, m2=3):
+def calc_kdj(high_series: pd.Series, low_series: pd.Series, close_series: pd.Series, n: int = 9, m1: int = 3, m2: int = 3) -> Tuple[pd.Series, pd.Series, pd.Series]:
     """
     计算 KDJ 指标。
 
@@ -1622,7 +1931,7 @@ def calc_kdj(high_series, low_series, close_series, n=9, m1=3, m2=3):
     return k, d, j
 
 
-def check_15min_golden_cross(context, stock_code):
+def check_15min_golden_cross(context, stock_code: str) -> bool:
     """
     检查15分钟MACD/KDJ金叉。
 
@@ -1690,7 +1999,7 @@ def check_15min_golden_cross(context, stock_code):
         return False
 
 
-def check_ma_dip(context, stock_code, ma_type='ma5'):
+def check_ma_dip(context, stock_code: str, ma_type: str = 'ma5') -> bool:
     """
     检查MA5/MA10回踩条件。
 
@@ -1737,7 +2046,7 @@ def check_ma_dip(context, stock_code, ma_type='ma5'):
         return False
 
 
-def update_ma_cache(context):
+def update_ma_cache(context) -> None:
     """
     更新MA5/MA10缓存，供盘中回踩检测使用。
     """
@@ -1775,7 +2084,7 @@ def update_ma_cache(context):
 # Section 13: 建仓执行逻辑
 # ============================================================================
 
-def calc_position_size(context, stock_code, ratio=1.0):
+def calc_position_size(context, stock_code: str, ratio: float = 1.0) -> int:
     """
     计算买入股数。
 
@@ -1807,7 +2116,7 @@ def calc_position_size(context, stock_code, ratio=1.0):
         return 0
 
 
-def execute_entry(context, data):
+def execute_entry(context, data) -> None:
     """
     盘中建仓主入口，遍历 entry_signals 执行建仓。
     """
@@ -1840,90 +2149,44 @@ def execute_entry(context, data):
             current_holdings = len(g.holdings)
 
 
-def execute_type_a(context, data, code, signal):
+def execute_type_a(context, data, code: str, signal: Dict) -> bool:
     """
     TYPE_A: 强势+积极建仓
-    - 开盘挂单50%
-    - MA5回踩补50%
+    - 开盘100%市价买入（JQ笼子机制自动限制价格在上限内）
     """
     if not signal['first_leg_done']:
-        # 第一腿: 开盘买入50%
-        shares = calc_position_size(context, code, ratio=0.5)
+        # 100%仓位，按照笼子上限（涨停价）挂单
+        shares = calc_position_size(context, code, ratio=1.0)
         if shares > 0:
             try:
-                order_result = order(code, shares)
-                if order_result is not None and _check_order_filled(context, code):
-                    signal['first_leg_done'] = True
-                    log.info(f"[TYPE_A] {code} 第一腿买入 {shares} 股")
-                    # 记录持仓
-                    _record_holding(context, code, signal, shares, leg='first')
-                    return True
-                else:
-                    log.info(f"[TYPE_A] {code} 买入未成交（可能涨停/停牌）")
-            except Exception as e:
-                log.info(f"[TYPE_A] {code} 第一腿买入失败: {e}")
-        return False
-
-    elif not signal['second_leg_done']:
-        # 第二腿: MA5回踩买入50%
-        if check_ma_dip(context, code, ma_type='ma5'):
-            shares = calc_position_size(context, code, ratio=0.5)
-            if shares > 0:
-                try:
+                cur_data = get_current_data()
+                high_limit = cur_data[code].high_limit
+                current_price = cur_data[code].last_price
+                if current_price and current_price > 0:
+                    # 市价买入，JQ笼子机制自动限制成交价在上限内
                     order_result = order(code, shares)
                     if order_result is not None and _check_order_filled(context, code):
-                        signal['second_leg_done'] = True
-                        log.info(f"[TYPE_A] {code} 第二腿买入 {shares} 股 (MA5回踩)")
-                        _update_holding(context, code, shares, leg='second')
+                        signal['first_leg_done'] = True
+                        signal['second_leg_done'] = True  # 单腿完成
+                        log.info(f"[TYPE_A] {code} 市价买入 {shares} 股，笼子上限 {high_limit:.2f}")
+                        _record_holding(context, code, signal, shares, leg='full')
                         return True
                     else:
-                        log.info(f"[TYPE_A] {code} 第二腿买入未成交")
-                except Exception as e:
-                    log.info(f"[TYPE_A] {code} 第二腿买入失败: {e}")
+                        log.info(f"[TYPE_A] {code} 市价买入未成交")
+                else:
+                    log.info(f"[TYPE_A] {code} 无法获取当前价格")
+            except Exception as e:
+                log.info(f"[TYPE_A] {code} 笼子上限挂单失败: {e}")
         return False
 
     return False
 
 
-def execute_type_b(context, data, code, signal):
+def execute_type_b(context, data, code: str, signal: Dict) -> bool:
     """
     TYPE_B: 平稳+积极建仓
-    - 10点后15min金叉全仓买入
-    """
-    current_time = context.current_dt.time()
-
-    # 10点前不操作
-    if current_time.hour < 10:
-        return False
-
-    # 检查15min金叉
-    if not check_15min_golden_cross(context, code):
-        return False
-
-    # 全仓买入
-    shares = calc_position_size(context, code, ratio=1.0)
-    if shares > 0:
-        try:
-            order_result = order(code, shares)
-            if order_result is not None and _check_order_filled(context, code):
-                signal['first_leg_done'] = True
-                signal['second_leg_done'] = True
-                log.info(f"[TYPE_B] {code} 金叉全仓买入 {shares} 股")
-                _record_holding(context, code, signal, shares, leg='full')
-                return True
-            else:
-                log.info(f"[TYPE_B] {code} 买入未成交（可能涨停/停牌）")
-        except Exception as e:
-            log.info(f"[TYPE_B] {code} 买入失败: {e}")
-
-    return False
-
-
-def execute_type_c(context, data, code, signal):
-    """
-    TYPE_C: 强势+适度建仓
-    - 10点后15min金叉半仓
-    - MA5/MA10回踩补半仓
+    - 10点后15min金叉买入70%
+    - MA5/MA10附近补仓30%
     """
     current_time = context.current_dt.time()
 
@@ -1936,48 +2199,163 @@ def execute_type_c(context, data, code, signal):
         if not check_15min_golden_cross(context, code):
             return False
 
-        # 半仓买入
-        shares = calc_position_size(context, code, ratio=0.5)
+        # 金叉买入70%
+        shares = calc_position_size(context, code, ratio=0.7)
         if shares > 0:
             try:
                 order_result = order(code, shares)
                 if order_result is not None and _check_order_filled(context, code):
                     signal['first_leg_done'] = True
-                    log.info(f"[TYPE_C] {code} 金叉半仓买入 {shares} 股")
+                    log.info(f"[TYPE_B] {code} 金叉买入 {shares} 股 (70%仓位)")
                     _record_holding(context, code, signal, shares, leg='first')
                     return True
                 else:
-                    log.info(f"[TYPE_C] {code} 第一腿买入未成交（可能涨停/停牌）")
+                    log.debug(f"[TYPE_B] {code} 金叉买入未成交（可能涨停/停牌）")
             except Exception as e:
-                log.info(f"[TYPE_C] {code} 第一腿买入失败: {e}")
+                log.debug(f"[TYPE_B] {code} 金叉买入失败: {e}")
         return False
 
     elif not signal['second_leg_done']:
-        # 第二腿: MA5或MA10回踩买入50%
+        # 第二腿: MA5或MA10附近补仓30%
         ma5_dip = check_ma_dip(context, code, ma_type='ma5')
         ma10_dip = check_ma_dip(context, code, ma_type='ma10')
 
         if ma5_dip or ma10_dip:
-            shares = calc_position_size(context, code, ratio=0.5)
+            shares = calc_position_size(context, code, ratio=0.3)
             if shares > 0:
                 try:
                     order_result = order(code, shares)
                     if order_result is not None and _check_order_filled(context, code):
                         signal['second_leg_done'] = True
                         dip_type = 'MA5' if ma5_dip else 'MA10'
-                        log.info(f"[TYPE_C] {code} 第二腿买入 {shares} 股 ({dip_type}回踩)")
+                        log.info(f"[TYPE_B] {code} {dip_type}附近补仓 {shares} 股 (30%仓位)")
                         _update_holding(context, code, shares, leg='second')
                         return True
                     else:
-                        log.info(f"[TYPE_C] {code} 第二腿买入未成交")
+                        log.debug(f"[TYPE_B] {code} 补仓买入未成交")
                 except Exception as e:
-                    log.info(f"[TYPE_C] {code} 第二腿买入失败: {e}")
+                    log.info(f"[TYPE_B] {code} 补仓买入失败: {e}")
         return False
 
     return False
 
 
-def _check_order_filled(context, code):
+def execute_type_c(context, data, code: str, signal: Dict) -> bool:
+    """
+    TYPE_C: 强势+适度建仓
+    - 9:26集合竞价50% (JQ中在9:30首tick以开盘价限价挂单模拟)
+    - 开盘价 ≤ 集合竞价 → 10点后金叉买入50%
+    - 开盘价 > 集合竞价 → 9:31市价挂单50%
+    - 已涨停 → 当天不再挂单
+    """
+    current_time = context.current_dt.time()
+
+    # 检查是否已涨停
+    try:
+        cur_data = get_current_data()
+        high_limit = cur_data[code].high_limit
+        current_price = cur_data[code].last_price
+        if high_limit and current_price >= high_limit:
+            log.debug(f"[TYPE_C] {code} 已涨停，当天不再挂单买入")
+            signal['skip_today'] = True
+            return False
+    except Exception:
+        pass
+
+    if signal.get('skip_today'):
+        return False
+
+    if not signal['first_leg_done']:
+        # 第一腿: 集合竞价挂单50%
+        # JQ中无法在9:26下单，在9:30首tick以开盘价限价挂单模拟集合竞价
+        auction_price = getattr(g, 'auction_prices', {}).get(code)
+        if auction_price is None or auction_price <= 0:
+            return False
+
+        # 确定第二腿策略: 根据开盘价与集合竞价的关系
+        if signal.get('second_leg_type') is None:
+            try:
+                cur_data = get_current_data()
+                open_price = cur_data[code].last_price
+            except Exception:
+                open_price = auction_price
+
+            if open_price <= auction_price:
+                signal['second_leg_type'] = 'golden_cross'
+            else:
+                signal['second_leg_type'] = 'market_order'
+
+        shares = calc_position_size(context, code, ratio=0.5)
+        if shares > 0:
+            try:
+                # 市价买入（首tick时市价≈集合竞价价格）
+                order_result = order(code, shares)
+                if order_result is not None and _check_order_filled(context, code):
+                    signal['first_leg_done'] = True
+                    log.info(f"[TYPE_C] {code} 集合竞价买入 {shares} 股，竞价 {auction_price:.2f}")
+                    _record_holding(context, code, signal, shares, leg='first')
+                    return True
+                else:
+                    signal['first_leg_done'] = True  # 标记已尝试，进入第二腿
+                    log.info(f"[TYPE_C] {code} 集合竞价未成交，进入第二腿 ({signal['second_leg_type']})")
+            except Exception as e:
+                log.info(f"[TYPE_C] {code} 集合竞价挂单失败: {e}")
+                return False
+        return False
+
+    elif not signal['second_leg_done']:
+        second_leg_type = signal.get('second_leg_type', 'golden_cross')
+
+        if second_leg_type == 'golden_cross':
+            # 开盘价 ≤ 集合竞价 → 10点后金叉买入50%
+            if current_time.hour < 10:
+                return False
+            if not check_15min_golden_cross(context, code):
+                return False
+            shares = calc_position_size(context, code, ratio=0.5)
+            if shares > 0:
+                try:
+                    order_result = order(code, shares)
+                    if order_result is not None and _check_order_filled(context, code):
+                        signal['second_leg_done'] = True
+                        log.debug(f"[TYPE_C] {code} 金叉买入 {shares} 股 (50%仓位)")
+                        if code in g.holdings:
+                            _update_holding(context, code, shares, leg='second')
+                        else:
+                            _record_holding(context, code, signal, shares, leg='full')
+                        return True
+                    else:
+                        log.debug(f"[TYPE_C] {code} 金叉买入未成交")
+                except Exception as e:
+                    log.debug(f"[TYPE_C] {code} 金叉买入失败: {e}")
+            return False
+
+        elif second_leg_type == 'market_order':
+            # 开盘价 > 集合竞价 → 9:31市价挂单50%
+            if current_time.hour == 9 and current_time.minute < 31:
+                return False
+            shares = calc_position_size(context, code, ratio=0.5)
+            if shares > 0:
+                try:
+                    order_result = order(code, shares)
+                    if order_result is not None and _check_order_filled(context, code):
+                        signal['second_leg_done'] = True
+                        log.info(f"[TYPE_C] {code} 9:31市价买入 {shares} 股 (50%仓位)")
+                        if code in g.holdings:
+                            _update_holding(context, code, shares, leg='second')
+                        else:
+                            _record_holding(context, code, signal, shares, leg='full')
+                        return True
+                    else:
+                        log.info(f"[TYPE_C] {code} 市价买入未成交")
+                except Exception as e:
+                    log.info(f"[TYPE_C] {code} 市价买入失败: {e}")
+            return False
+
+    return False
+
+
+def _check_order_filled(context, code: str) -> bool:
     """
     检查订单是否实际成交（持仓是否存在于portfolio中）。
     JQ的order()可能返回Order对象但订单被取消（如涨停买不进）。
@@ -1991,7 +2369,7 @@ def _check_order_filled(context, code):
     return False
 
 
-def _record_holding(context, code, signal, shares, leg='full'):
+def _record_holding(context, code: str, signal: Dict, shares: int, leg: str = 'full') -> None:
     """
     记录持仓信息到 g.holdings。
     仅在订单实际成交后调用。
@@ -2034,7 +2412,7 @@ def _record_holding(context, code, signal, shares, leg='full'):
         h['buy_price'] = total_amount / total_shares if total_shares > 0 else h['buy_price']
 
 
-def _update_holding(context, code, shares, leg='second'):
+def _update_holding(context, code: str, shares: int, leg: str = 'second') -> None:
     """
     更新持仓 (第二腿买入后)。
     """
@@ -2059,14 +2437,14 @@ def _update_holding(context, code, shares, leg='second'):
 # Section 14: 止盈逻辑
 # ============================================================================
 
-def check_take_profit(context, data):
+def check_take_profit(context, data) -> None:
     """
     检查所有持仓的止盈条件。
 
     止盈优先级:
-    1. T+1利润 > 9%
+    1. T+1利润 > 9% (涨停开板则止盈，封涨停则继续持股)
     2. 达到目标价
-    3. 移动止盈 (从最高价回撤 > 3%)
+    3. 移动止盈 (从最高价回撤 > 4%，让利润奔跑)
     4. 最大持仓天数
     """
     if not g.holdings:
@@ -2101,13 +2479,19 @@ def check_take_profit(context, data):
             log.info(f"[止盈] {code} 当日新建仓(T+0)，跳过止盈检查")
             continue
 
-        # 1. T+1利润 > 9%
+        # 1. T+1利润 > 9% + 涨停开板检查
         if hold_days >= 1:
             profit_pct = (current_price - buy_price) / buy_price
             if profit_pct > STRATEGY_CONFIG['t1_profit_take_pct']:
-                log.info(f"[止盈] {code} T+{hold_days}利润 {profit_pct:.1%} > {STRATEGY_CONFIG['t1_profit_take_pct']:.0%}")
-                _sell_position(context, code, reason='T+1高利止盈')
-                continue
+                # 检查是否封涨停：当前价格在涨停价则继续持股，开板则止盈
+                high_limit = cur_data[code].high_limit
+                if high_limit and current_price >= high_limit:
+                    log.info(f"[止盈] {code} T+{hold_days}利润 {profit_pct:.1%} > {STRATEGY_CONFIG['t1_profit_take_pct']:.0%}，但封涨停，继续持股")
+                    # 封涨停，不卖出，继续持股让利润奔跑
+                else:
+                    log.info(f"[止盈] {code} T+{hold_days}利润 {profit_pct:.1%} > {STRATEGY_CONFIG['t1_profit_take_pct']:.0%}，涨停开板，止盈")
+                    _sell_position(context, code, reason='T+1高利止盈(开板)')
+                    continue
 
         # 2. 达到目标价 (仅当目标价 > 买入价时才有意义)
         if (not pd.isna(target_price) and target_price > 0 and
@@ -2116,7 +2500,7 @@ def check_take_profit(context, data):
             _sell_position(context, code, reason='目标价止盈')
             continue
 
-        # 3. 移动止盈 (从最高价回撤 > 3%)
+        # 3. 移动止盈 (从最高价回撤 > 4%，让利润奔跑)
         if hold_days >= 1 and highest_price > 0:
             drawdown = (highest_price - current_price) / highest_price
             if drawdown > STRATEGY_CONFIG['trailing_stop_pct']:
@@ -2135,7 +2519,7 @@ def check_take_profit(context, data):
 # Section 15: 止损逻辑
 # ============================================================================
 
-def check_stop_loss(context, data):
+def check_stop_loss(context, data) -> None:
     """
     检查所有持仓的止损条件。
 
@@ -2160,6 +2544,7 @@ def check_stop_loss(context, data):
 
         # T+1规则：当日新建仓股票不能卖出，跳过止损检查
         if buy_date is not None and buy_date == today:
+            log.info(f"[止损] {code} 当日新建仓(T+0)，跳过止损检查")
             continue
 
         # 获取当前价格
@@ -2201,7 +2586,7 @@ def check_stop_loss(context, data):
                 _sell_position(context, code, reason='崩盘清仓')
 
 
-def check_market_crash(context):
+def check_market_crash(context) -> bool:
     """
     检测市场崩盘：涨跌比 < 1:4。
 
@@ -2256,7 +2641,7 @@ def check_market_crash(context):
         return False
 
 
-def _get_stock_name(code):
+def _get_stock_name(code: str) -> str:
     """
     从股票池或JQ API获取股票名称。
     """
@@ -2278,7 +2663,7 @@ def _get_stock_name(code):
     return ''
 
 
-def _sell_position(context, code, reason=''):
+def _sell_position(context, code: str, reason: str = '') -> None:
     """
     卖出持仓。
     先检查T+1限制（当日买入不能卖出），再检查实际持仓是否存在。
@@ -2376,7 +2761,7 @@ def _sell_position(context, code, reason=''):
 # Section 16: 日志输出
 # ============================================================================
 
-def log_daily_summary(context):
+def log_daily_summary(context) -> None:
     """
     每日盘后输出完整日志。
 
@@ -2482,244 +2867,380 @@ def log_daily_summary(context):
 
 
 # ============================================================================
-# Section 16.5: 涨停后建仓日分析
+# Section 17: IC衰减监控 & 因子共线性检测
 # ============================================================================
 
-def update_post_zt_tracker(context):
+# --- IC衰减监控配置 ---
+IC_MONITOR_CONFIG = {
+    'enabled': True,                     # 是否启用IC监控
+    'factor_cols': [                     # 需监控的因子列
+        'factor_alpha6', 'factor_alpha12', 'factor_alpha33',
+        'factor_alpha41', 'factor_alpha49', 'factor_alpha54',
+        'factor_seal_speed', 'factor_zt_board_type', 'factor_seal_float_ratio',
+    ],
+    'target_col': 'next_day_return',     # 预测目标列 (需在 after_trading_end 中计算)
+    'ic_warning_threshold': 0.03,        # IC绝对值低于此值发出警告
+    'ic_decay_window': 20,               # IC衰减检测窗口 (交易日数)
+    'ic_history_max_len': 60,            # IC历史最大保留天数
+    'collinearity_threshold': 0.7,       # 相关系数超过此值视为高共线
+    'vif_threshold': 5.0,                # VIF超过此值视为高共线
+}
+
+
+def calc_ic(factor_df: pd.DataFrame, factor_col: str, target_col: str) -> Optional[float]:
     """
-    盘后更新涨停后每日收盘价跟踪器。
-    
-    对股票池中每只股票，记录其ZT日后的每日收盘价。
-    超过跟踪天数的股票自动移除。
-    
-    g.post_zt_tracker 结构:
-    {
-        '000001.XSHE': {
-            'zt_date': date(2024,1,3),
-            'name': '平安银行',
-            'daily_closes': {
-                date(2024,1,4): 10.5,   # T+1 收盘价
-                date(2024,1,5): 10.8,   # T+2 收盘价
-                ...
-            }
-        },
-        ...
-    }
-    """
-    today = context.current_dt.date()
-    max_track = STRATEGY_CONFIG.get('post_zt_max_track_days', 10)
-    pool = g.stock_pool
+    计算单个因子的 IC (Information Coefficient) = Spearman秩相关系数。
 
-    if pool.empty or 'jq_code' not in pool.columns:
-        return
+    Parameters
+    ----------
+    factor_df : pd.DataFrame
+        包含因子值和目标收益的数据
+    factor_col : str
+        因子列名
+    target_col : str
+        目标收益列名
 
-    # 获取池中所有股票今日收盘价 (批量)
-    stock_codes = pool['jq_code'].tolist()
-    today_closes = {}
-
-    try:
-        for code in stock_codes:
-            try:
-                cur_data = get_current_data()
-                price = cur_data[code].last_price
-                if price and price > 0:
-                    today_closes[code] = price
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # 更新跟踪器
-    for idx, row in pool.iterrows():
-        code = row.get('jq_code', '')
-        zt_date = row.get('zt_date')
-        name = row.get('name', '')
-
-        if not code or not zt_date:
-            continue
-
-        # 计算 ZT 后天数
-        if hasattr(zt_date, 'date'):
-            zt_date_val = zt_date.date()
-        elif isinstance(zt_date, dt.date):
-            zt_date_val = zt_date
-        else:
-            try:
-                zt_date_val = pd.Timestamp(zt_date).date()
-            except Exception:
-                continue
-
-        days_after_zt = (today - zt_date_val).days
-
-        # 超过跟踪天数，跳过 (后续清理)
-        if days_after_zt > max_track:
-            continue
-
-        # 初始化跟踪记录
-        if code not in g.post_zt_tracker:
-            g.post_zt_tracker[code] = {
-                'zt_date': zt_date_val,
-                'name': name,
-                'daily_closes': {},
-            }
-
-        # 记录今日收盘价
-        if code in today_closes:
-            g.post_zt_tracker[code]['daily_closes'][today] = today_closes[code]
-
-    # 清理超过跟踪天数的股票
-    expired_codes = []
-    for code, tracker in g.post_zt_tracker.items():
-        zt_d = tracker.get('zt_date')
-        if zt_d and (today - zt_d).days > max_track:
-            expired_codes.append(code)
-    for code in expired_codes:
-        del g.post_zt_tracker[code]
-
-    # 清理已不在股票池中的股票
-    pool_codes = set(pool['jq_code'].tolist())
-    removed_codes = [c for c in g.post_zt_tracker if c not in pool_codes]
-    for code in removed_codes:
-        del g.post_zt_tracker[code]
-
-
-def analyze_post_zt_returns(context):
-    """
-    分析涨停后不同建仓日的收益表现。
-    
-    生成一个 entry_day × hold_days 的收益矩阵:
-    - entry_day: ZT后第N天建仓 (T+1, T+2, ..., T+N)
-    - hold_days: 持仓M天后的收益
-    
-    例如: entry_day=1, hold_days=2 表示 T+1建仓，持仓2天后的平均收益
-    
     Returns
     -------
-    pd.DataFrame
-        收益矩阵，行为建仓日(T+1~T+N)，列为持仓天数(1~5)
+    Optional[float]
+        IC值，若数据不足返回 None
     """
-    max_track = STRATEGY_CONFIG.get('post_zt_max_track_days', 10)
-    hold_days_list = STRATEGY_CONFIG.get('post_zt_hold_days', [1, 2, 3, 4, 5])
-    tracker = g.post_zt_tracker
-
-    if not tracker:
+    if factor_col not in factor_df.columns or target_col not in factor_df.columns:
+        return None
+    valid = factor_df[[factor_col, target_col]].dropna()
+    if len(valid) < 5:
+        return None
+    try:
+        ic, _ = stats.spearmanr(valid[factor_col], valid[target_col])
+        return float(ic) if not np.isnan(ic) else None
+    except Exception:
         return None
 
-    # 收集所有 (entry_day, hold_day, return) 样本
-    samples = []  # list of (entry_day, hold_days, return_pct, code)
 
-    for code, track_data in tracker.items():
-        zt_date = track_data.get('zt_date')
-        daily_closes = track_data.get('daily_closes', {})
+def calc_ic_batch(factor_df: pd.DataFrame, factor_cols: Optional[List[str]] = None,
+                  target_col: str = 'next_day_return') -> Dict[str, Optional[float]]:
+    """
+    批量计算多个因子的 IC 值。
 
-        if not zt_date or not daily_closes or len(daily_closes) < 2:
+    Parameters
+    ----------
+    factor_df : pd.DataFrame
+        包含因子值和目标收益的数据
+    factor_cols : Optional[List[str]]
+        因子列名列表，默认使用 IC_MONITOR_CONFIG 中的配置
+    target_col : str
+        目标收益列名
+
+    Returns
+    -------
+    Dict[str, Optional[float]]
+        {因子名: IC值} 字典
+    """
+    if factor_cols is None:
+        factor_cols = IC_MONITOR_CONFIG['factor_cols']
+    ic_results = {}
+    for col in factor_cols:
+        ic_results[col] = calc_ic(factor_df, col, target_col)
+    return ic_results
+
+
+def update_ic_history(context, ic_results: Dict[str, Optional[float]]) -> None:
+    """
+    将当日 IC 结果追加到历史记录中，并检测 IC 衰减。
+
+    Parameters
+    ----------
+    context : object
+        JQ context 对象 (通过 g.ic_history 访问历史)
+    ic_results : Dict[str, Optional[float]]
+        当日 {因子名: IC值} 字典
+    """
+    if not hasattr(g, 'ic_history'):
+        g.ic_history = {}  # {factor_name: [ic_day1, ic_day2, ...]}
+
+    for factor_name, ic_val in ic_results.items():
+        if factor_name not in g.ic_history:
+            g.ic_history[factor_name] = []
+        history = g.ic_history[factor_name]
+        history.append(ic_val)
+        # 保留最近 N 天
+        max_len = IC_MONITOR_CONFIG['ic_history_max_len']
+        if len(history) > max_len:
+            g.ic_history[factor_name] = history[-max_len:]
+
+
+def check_ic_decay(context) -> Dict[str, Dict]:
+    """
+    检测各因子的 IC 衰减情况。
+
+    对每个因子，比较最近窗口内的平均IC与历史平均IC，
+    若衰减幅度超过阈值则标记为衰减。
+
+    Returns
+    -------
+    Dict[str, Dict]
+        {因子名: {'current_ic': float, 'history_avg_ic': float,
+                  'decay_ratio': float, 'is_decayed': bool}}
+    """
+    if not hasattr(g, 'ic_history'):
+        return {}
+
+    decay_report = {}
+    window = IC_MONITOR_CONFIG['ic_decay_window']
+    warning_threshold = IC_MONITOR_CONFIG['ic_warning_threshold']
+
+    for factor_name, history in g.ic_history.items():
+        if len(history) < 5:
             continue
 
-        # 按日期排序
-        sorted_dates = sorted(daily_closes.keys())
+        # 最近窗口的IC均值
+        recent = [v for v in history[-window:] if v is not None]
+        if len(recent) < 3:
+            continue
+        current_avg_ic = np.mean(recent)
 
-        # 对每个可能的建仓日 (T+1 ~ T+max_track-1)
-        for entry_offset in range(1, max_track):
-            # 找到建仓日的收盘价
-            entry_date = None
-            entry_close = None
+        # 历史IC均值 (排除最近窗口)
+        older = [v for v in history[:-window] if v is not None]
+        if len(older) < 3:
+            history_avg_ic = current_avg_ic
+        else:
+            history_avg_ic = np.mean(older)
 
-            for d in sorted_dates:
-                days_after = (d - zt_date).days
-                if days_after == entry_offset:
-                    entry_date = d
-                    entry_close = daily_closes[d]
-                    break
+        # 衰减比 = (历史|IC| - 当前|IC|) / 历史|IC|
+        if abs(history_avg_ic) > 1e-6:
+            decay_ratio = (abs(history_avg_ic) - abs(current_avg_ic)) / abs(history_avg_ic)
+        else:
+            decay_ratio = 0.0
 
-            if entry_close is None or entry_close <= 0:
-                continue
+        is_decayed = (abs(current_avg_ic) < warning_threshold) or (decay_ratio > 0.5)
 
-            # 对每个持仓天数，计算收益
-            for hd in hold_days_list:
-                # 找到持仓hd天后的日期和收盘价
-                # 需要找到 entry_date 之后的第 hd 个交易日
-                entry_idx = sorted_dates.index(entry_date)
-                exit_idx = entry_idx + hd
+        decay_report[factor_name] = {
+            'current_ic': round(current_avg_ic, 4),
+            'history_avg_ic': round(history_avg_ic, 4),
+            'decay_ratio': round(decay_ratio, 4),
+            'is_decayed': is_decayed,
+        }
 
-                if exit_idx < len(sorted_dates):
-                    exit_close = daily_closes[sorted_dates[exit_idx]]
-                    if exit_close > 0:
-                        ret = (exit_close - entry_close) / entry_close
-                        samples.append((entry_offset, hd, ret, code))
+    return decay_report
 
-    if not samples:
-        return None
 
-    # 构建收益矩阵
-    entry_days = sorted(set(s[0] for s in samples))
-    hold_days_cols = sorted(set(s[1] for s in samples))
+def log_ic_monitor_report(context) -> None:
+    """
+    输出 IC 监控报告到日志，包含衰减警告。
+    """
+    if not IC_MONITOR_CONFIG['enabled']:
+        return
 
-    # 统计每个 (entry_day, hold_days) 的平均收益和样本数
-    from collections import defaultdict
-    ret_sum = defaultdict(float)
-    ret_count = defaultdict(int)
-    win_count = defaultdict(int)
+    decay_report = check_ic_decay(context)
+    if not decay_report:
+        return
 
-    for entry_offset, hd, ret, code in samples:
-        key = (entry_offset, hd)
-        ret_sum[key] += ret
-        ret_count[key] += 1
-        if ret > 0:
-            win_count[key] += 1
+    log.info("📊 IC衰减监控报告:")
+    log.info(f"  {'因子':<25} {'当前IC':>8} {'历史IC':>8} {'衰减比':>8} {'状态':>6}")
+    log.info("  " + "-" * 60)
 
-    # 构建DataFrame
-    rows = []
-    for ed in entry_days:
-        row = {'建仓日': f'T+{ed}'}
-        for hd in hold_days_cols:
-            key = (ed, hd)
-            if ret_count[key] > 0:
-                avg_ret = ret_sum[key] / ret_count[key]
-                win_rate = win_count[key] / ret_count[key]
-                row[f'持仓{hd}日收益'] = f'{avg_ret:.2%}'
-                row[f'持仓{hd}日胜率'] = f'{win_rate:.0%}'
-                row[f'持仓{hd}日样本'] = ret_count[key]
-            else:
-                row[f'持仓{hd}日收益'] = '-'
-                row[f'持仓{hd}日胜率'] = '-'
-                row[f'持仓{hd}日样本'] = 0
-        rows.append(row)
+    for factor_name, report in sorted(decay_report.items(), key=lambda x: x[1]['current_ic'], reverse=True):
+        status = '⚠️ 衰减' if report['is_decayed'] else '✅ 正常'
+        log.info(f"  {factor_name:<25} {report['current_ic']:>8.4f} "
+                 f"{report['history_avg_ic']:>8.4f} {report['decay_ratio']:>8.2%} {status:>6}")
 
-    result_df = pd.DataFrame(rows)
 
-    # 输出分析日志
-    log.info("=" * 80)
-    log.info("📊 涨停后建仓日收益分析")
-    log.info(f"   样本总数: {len(samples)} | 跟踪股票数: {len(tracker)}")
+def detect_factor_collinearity(factor_df: pd.DataFrame,
+                                factor_cols: Optional[List[str]] = None,
+                                method: str = 'both') -> Dict:
+    """
+    检测因子间的共线性 (相关系数 + VIF)。
 
-    # 简化版: 只输出收益矩阵
-    simple_rows = []
-    for ed in entry_days:
-        row = {'建仓日': f'T+{ed}'}
-        for hd in hold_days_cols:
-            key = (ed, hd)
-            if ret_count[key] > 0:
-                avg_ret = ret_sum[key] / ret_count[key]
-                win_rate = win_count[key] / ret_count[key]
-                row[f'持{hd}日'] = f'{avg_ret:+.1%}(胜{win_rate:.0%}/N={ret_count[key]})'
-            else:
-                row[f'持{hd}日'] = '-'
-        simple_rows.append(row)
+    Parameters
+    ----------
+    factor_df : pd.DataFrame
+        包含因子值的数据
+    factor_cols : Optional[List[str]]
+        因子列名列表，默认使用 IC_MONITOR_CONFIG 中的配置
+    method : str
+        'correlation' 仅相关系数, 'vif' 仅VIF, 'both' 两者都算
 
-    for row in simple_rows:
-        parts = [f"  {row['建仓日']}"]
-        for hd in hold_days_cols:
-            col = f'持{hd}日'
-            parts.append(f"{row.get(col, '-')}")
-        log.info(' | '.join(parts))
+    Returns
+    -------
+    Dict
+        {
+            'correlation_matrix': pd.DataFrame or None,
+            'high_corr_pairs': List[Tuple[str, str, float]],
+            'vif_results': Dict[str, float] or None,
+            'high_vif_factors': List[str],
+            'recommendation': str
+        }
+    """
+    if factor_cols is None:
+        factor_cols = IC_MONITOR_CONFIG['factor_cols']
 
-    log.info("=" * 80)
+    # 仅保留存在的列
+    available_cols = [c for c in factor_cols if c in factor_df.columns]
+    if len(available_cols) < 2:
+        return {
+            'correlation_matrix': None,
+            'high_corr_pairs': [],
+            'vif_results': None,
+            'high_vif_factors': [],
+            'recommendation': '因子数量不足，无法进行共线性检测',
+        }
 
-    return result_df
+    valid_data = factor_df[available_cols].dropna()
+    if len(valid_data) < 10:
+        return {
+            'correlation_matrix': None,
+            'high_corr_pairs': [],
+            'vif_results': None,
+            'high_vif_factors': [],
+            'recommendation': '有效数据不足，无法进行共线性检测',
+        }
+
+    result = {
+        'correlation_matrix': None,
+        'high_corr_pairs': [],
+        'vif_results': None,
+        'high_vif_factors': [],
+        'recommendation': '',
+    }
+
+    # ---- 1. 相关系数矩阵 ----
+    if method in ('correlation', 'both'):
+        corr_matrix = valid_data.corr(method='spearman')
+        result['correlation_matrix'] = corr_matrix
+
+        # 找出高相关因子对
+        threshold = IC_MONITOR_CONFIG['collinearity_threshold']
+        high_corr_pairs = []
+        for i in range(len(corr_matrix.columns)):
+            for j in range(i + 1, len(corr_matrix.columns)):
+                corr_val = corr_matrix.iloc[i, j]
+                if abs(corr_val) > threshold:
+                    high_corr_pairs.append((
+                        corr_matrix.columns[i],
+                        corr_matrix.columns[j],
+                        round(corr_val, 4)
+                    ))
+        result['high_corr_pairs'] = high_corr_pairs
+
+    # ---- 2. VIF (方差膨胀因子) ----
+    if method in ('vif', 'both'):
+        try:
+            from statsmodels.stats.outliers_influence import variance_inflation_factor
+            from statsmodels.tools.tools import add_constant
+
+            X = valid_data[available_cols]
+            X_const = add_constant(X)
+
+            vif_results = {}
+            for idx, col in enumerate(available_cols):
+                try:
+                    vif_val = variance_inflation_factor(X_const.values, idx + 1)
+                    vif_results[col] = round(vif_val, 2)
+                except Exception:
+                    vif_results[col] = np.nan
+
+            result['vif_results'] = vif_results
+
+            vif_threshold = IC_MONITOR_CONFIG['vif_threshold']
+            high_vif_factors = [k for k, v in vif_results.items()
+                                if not np.isnan(v) and v > vif_threshold]
+            result['high_vif_factors'] = high_vif_factors
+
+        except ImportError:
+            result['recommendation'] = 'statsmodels 未安装，VIF 检测不可用。请 pip install statsmodels'
+
+    # ---- 3. 生成建议 ----
+    recommendations = []
+    if result['high_corr_pairs']:
+        for f1, f2, corr in result['high_corr_pairs']:
+            recommendations.append(
+                f"高相关 ({corr:+.2f}): {f1} ↔ {f2}，建议保留IC更高者"
+            )
+    if result.get('high_vif_factors'):
+        for f in result['high_vif_factors']:
+            vif_val = result['vif_results'][f]
+            recommendations.append(
+                f"高VIF ({vif_val:.1f}): {f}，建议剔除或降权"
+            )
+    if not recommendations:
+        recommendations.append('✅ 因子间共线性在可接受范围内')
+
+    result['recommendation'] = '\n'.join(recommendations)
+    return result
+
+
+def log_collinearity_report(factor_df: pd.DataFrame,
+                             factor_cols: Optional[List[str]] = None) -> None:
+    """
+    输出因子共线性检测报告到日志。
+    """
+    result = detect_factor_collinearity(factor_df, factor_cols, method='both')
+
+    log.info("📊 因子共线性检测报告:")
+
+    # 高相关对
+    if result['high_corr_pairs']:
+        log.info("  高相关因子对 (|ρ| > {:.1f}):".format(IC_MONITOR_CONFIG['collinearity_threshold']))
+        for f1, f2, corr in result['high_corr_pairs']:
+            log.info(f"    {f1} ↔ {f2}: ρ = {corr:+.4f}")
+    else:
+        log.info("  ✅ 无高相关因子对")
+
+    # VIF
+    if result['vif_results']:
+        log.info("  VIF检测结果 (阈值 > {:.1f}):".format(IC_MONITOR_CONFIG['vif_threshold']))
+        for factor, vif_val in sorted(result['vif_results'].items(),
+                                       key=lambda x: x[1] if not np.isnan(x[1]) else 0,
+                                       reverse=True):
+            flag = ' ⚠️' if (not np.isnan(vif_val) and vif_val > IC_MONITOR_CONFIG['vif_threshold']) else ''
+            log.info(f"    {factor}: VIF = {vif_val:.2f}{flag}")
+
+    # 建议
+    log.info("  建议:")
+    for line in result['recommendation'].split('\n'):
+        log.info(f"    {line}")
+
+
+def run_factor_diagnostics(context, factor_df: pd.DataFrame) -> Dict:
+    """
+    运行完整的因子诊断 (IC衰减 + 共线性)，返回综合报告。
+    可在 after_trading_end 中调用。
+
+    Parameters
+    ----------
+    context : object
+        JQ context 对象
+    factor_df : pd.DataFrame
+        当日因子数据 (需包含 next_day_return 列用于IC计算)
+
+    Returns
+    -------
+    Dict
+        {'ic_decay': Dict, 'collinearity': Dict}
+    """
+    diagnostics = {'ic_decay': {}, 'collinearity': {}}
+
+    if not IC_MONITOR_CONFIG['enabled']:
+        return diagnostics
+
+    # 1. IC计算与历史更新
+    target_col = IC_MONITOR_CONFIG['target_col']
+    if target_col in factor_df.columns:
+        ic_results = calc_ic_batch(factor_df, target_col=target_col)
+        update_ic_history(context, ic_results)
+        diagnostics['ic_decay'] = check_ic_decay(context)
+    else:
+        # 无目标收益列时，仅记录因子值统计
+        log.info(f"⚠️ IC监控: 未找到目标列 '{target_col}'，跳过IC计算")
+
+    # 2. 共线性检测
+    diagnostics['collinearity'] = detect_factor_collinearity(factor_df, method='both')
+
+    return diagnostics
 
 
 # ============================================================================
-# Section 17: JQ策略框架
+# Section 18: JQ策略框架
 # ============================================================================
 
 def initialize(context):
@@ -2744,11 +3265,11 @@ def initialize(context):
     g.daily_log = []               # 日志
     g.trailing_stops = {}          # 移动止盈线
     g.ma_cache = {}                # MA5/MA10缓存
+    g.auction_prices = {}          # TYPE_C集合竞价价格缓存
+    g.auction_captured_today = False  # 今日是否已捕获集合竞价
     g.crash_checked_today = False  # 今日是否已检查崩盘
     g.crash_detected_today = False # 今日是否检测到崩盘
     g.trade_enabled_today = True   # 今日是否允许交易
-    g.post_zt_tracker = {}         # 涨停后建仓日分析跟踪器
-    g.trading_day_count = 0        # 交易日计数器
 
     log.info("[initialize] 涨停板交易策略初始化完成")
     log.info(f"[initialize] 最大持仓: {STRATEGY_CONFIG['max_holdings']}, "
@@ -2777,6 +3298,8 @@ def before_trading_start(context):
     g.crash_checked_today = False
     g.crash_detected_today = False
     g.entry_signals = {}
+    g.auction_prices = {}           # 重置集合竞价价格缓存
+    g.auction_captured_today = False  # 重置竞价捕获标志
 
     # Step 1: 获取昨日涨停股
     new_zt_df = get_yesterday_zt_stocks(context)
@@ -2833,19 +3356,20 @@ def before_trading_start(context):
                 # 预测
                 predict_df = predict_next_day(scored_df)
 
-                # 更新股票池中的评分/分类/信号
+                # 批量更新股票池中的评分/分类/信号 (替代逐行 iterrows+at[])
                 if predict_df is not None and not predict_df.empty:
-                    for idx, row in predict_df.iterrows():
-                        jq_code = row.get('jq_code', '')
-                        if jq_code in g.stock_pool['jq_code'].values:
-                            pool_idx = g.stock_pool[g.stock_pool['jq_code'] == jq_code].index[0]
-                            g.stock_pool.at[pool_idx, 'total_score'] = row.get('total_score', np.nan)
-                            g.stock_pool.at[pool_idx, 'classification'] = row.get('classification', '')
-                            g.stock_pool.at[pool_idx, 'signal'] = row.get('signal', '')
-                            g.stock_pool.at[pool_idx, 'entry_index'] = row.get('entry_index', np.nan)
-                            g.stock_pool.at[pool_idx, 'buy_price'] = row.get('buy_price', np.nan)
-                            g.stock_pool.at[pool_idx, 'stop_loss'] = row.get('stop_loss', np.nan)
-                            g.stock_pool.at[pool_idx, 'target_price'] = row.get('target_price', np.nan)
+                    _update_cols = ['total_score', 'classification', 'signal',
+                                    'entry_index', 'buy_price', 'stop_loss', 'target_price']
+                    _available_cols = [c for c in _update_cols if c in predict_df.columns]
+                    _predict_subset = predict_df[['jq_code'] + _available_cols].drop_duplicates('jq_code', keep='first')
+                    _predict_indexed = _predict_subset.set_index('jq_code')
+                    _pool_mask = g.stock_pool['jq_code'].isin(_predict_indexed.index)
+
+                    if _pool_mask.any():
+                        _matched_codes = g.stock_pool.loc[_pool_mask, 'jq_code']
+                        for _col in _available_cols:
+                            if _col in _predict_indexed.columns:
+                                g.stock_pool.loc[_pool_mask, _col] = _predict_indexed.loc[_matched_codes, _col].values
 
                 # Step 9: 生成建仓信号 (仅当允许交易时)
                 if g.trade_enabled_today and predict_df is not None and not predict_df.empty:
@@ -2855,6 +3379,7 @@ def before_trading_start(context):
 
         except Exception as e:
             log.info(f"[before_trading_start] 分析管线异常: {e}")
+            log.info(f"[before_trading_start] 异常堆栈:\n{traceback.format_exc()}")
 
     # Step 10: 更新MA缓存
     update_ma_cache(context)
@@ -2870,10 +3395,25 @@ def handle_data(context, data):
     盘中每个Tick调用。
 
     执行顺序:
+    0. 捕获集合竞价价格 (TYPE_C需要，仅首tick)
     1. 检查止损条件 (最优先)
     2. 检查止盈条件
     3. 检查建仓条件 (仅当允许交易时)
     """
+    # 0. 首tick捕获集合竞价价格 (用于TYPE_C)
+    if not g.auction_captured_today and g.entry_signals:
+        g.auction_captured_today = True
+        try:
+            cur_data = get_current_data()
+            for code, signal in g.entry_signals.items():
+                if signal.get('entry_type') == 'TYPE_C':
+                    open_price = cur_data[code].last_price
+                    if open_price and open_price > 0:
+                        g.auction_prices[code] = open_price
+                        log.debug(f"[TYPE_C] {code} 捕获集合竞价(开盘价): {open_price:.2f}")
+        except Exception as e:
+            log.debug(f"[TYPE_C] 捕获集合竞价异常: {e}")
+
     # 1. 检查止损
     check_stop_loss(context, data)
 
@@ -2932,10 +3472,13 @@ def after_trading_end(context):
                 'trailing_line': trailing_line,
             }
 
-    # 3. 清理已完成的entry_signals (两腿都完成或已不在持仓中)
+    # 3. 清理已完成的entry_signals (两腿都完成/已跳过/已不在持仓中)
     for code in list(g.entry_signals.keys()):
         signal = g.entry_signals[code]
         if signal.get('first_leg_done') and signal.get('second_leg_done'):
+            del g.entry_signals[code]
+        elif signal.get('skip_today'):
+            # TYPE_C 涨停跳过，当天不再挂单，盘后清理
             del g.entry_signals[code]
         elif code not in g.holdings and signal.get('first_leg_done'):
             # 已卖出，清理信号
@@ -2957,17 +3500,30 @@ def after_trading_end(context):
     except Exception:
         pass
 
-    # 5. 输出盘后日志
+    # 5. 因子诊断 (IC衰减监控 + 共线性检测)
+    if IC_MONITOR_CONFIG['enabled'] and not g.stock_pool.empty:
+        try:
+            # 构建当日因子数据 (从股票池中提取因子列)
+            _factor_cols_in_pool = [c for c in IC_MONITOR_CONFIG['factor_cols']
+                                     if c in g.stock_pool.columns]
+            if _factor_cols_in_pool:
+                _factor_data = g.stock_pool[['jq_code'] + _factor_cols_in_pool].copy()
+
+                # 计算次日收益 (仅对已持仓股票可计算实际收益)
+                # 对于IC监控，使用 entry_index 作为代理目标
+                if 'entry_index' in g.stock_pool.columns:
+                    _factor_data['next_day_return'] = g.stock_pool['entry_index']
+                    _diagnostics = run_factor_diagnostics(context, _factor_data)
+                else:
+                    _diagnostics = run_factor_diagnostics(context, _factor_data)
+
+                # 输出IC衰减报告
+                log_ic_monitor_report(context)
+
+                # 输出共线性报告
+                log_collinearity_report(_factor_data)
+        except Exception as e:
+            log.info(f"[after_trading_end] 因子诊断异常: {e}")
+
+    # 6. 输出盘后日志
     log_daily_summary(context)
-
-    # 6. 更新涨停后建仓日分析跟踪器
-    g.trading_day_count += 1
-    try:
-        update_post_zt_tracker(context)
-
-        # 每N个交易日输出一次分析
-        log_interval = STRATEGY_CONFIG.get('post_zt_log_interval', 20)
-        if g.trading_day_count % log_interval == 0:
-            analyze_post_zt_returns(context)
-    except Exception as e:
-        log.info(f"[after_trading_end] 涨停后分析异常: {e}")
