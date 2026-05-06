@@ -1,52 +1,6 @@
 #!/usr/bin/env python
 # coding: utf-8
 
-# # 涨停板股票后 N 日走势分析
-# 
-# ## JoinQuant Research Notebook 研究程序
-# 
-# ---
-# 
-# ### 核心逻辑
-# 1. 从用户上传的 CSV/Excel 文件读取备选股票列表
-# 2. 以"自选时间"作为涨停日，"自选价格"作为涨停日收盘价
-# 3. 调用 JoinQuant API 获取涨停日后 N=1~5 日的行情数据
-# 4. 计算多维度因子，构建评分模型
-# 5. 分类为强势/平稳/弱势，输出 Top3 候选
-# 
-# ### 字段映射
-# 
-# | 文件字段 | 程序内部含义 | 说明 |
-# |---|---|---|
-# | 自选时间 | 涨停日 | 定义为该股涨停的日期 |
-# | 自选价格 | 涨停日收盘价 | 涨停当日的收盘价 |
-# | 自选收益 | 相对涨停日收益 | (现价-涨停价)/涨停价 |a
-# | 连涨天数 | 连板/趋势强度 | 连续涨停天数参考 |
-# | 昨日涨幅% | 是否涨停判断 | >=9.8% 视为涨停 |
-# 
-# ### 评分模型 (0~100)
-# 
-# | 因子类别 | 权重 | 细项 |
-# |---|---|---|
-# | 价格强度 | 30 | N日收益、最大涨幅、防守线满足比例 |
-# | 趋势结构 | 20 | MA5位置、乖离率、连涨天数、3/5日涨幅 |
-# | 成交量 | 20 | 量比、换手率、内外盘比、量价配合 |
-# | 资金 | 15 | 主力净流入、主力净比、3日主力净流入 |
-# | 基本面 | 10 | 市盈率、ROE、净利润同比、毛利率 |
-# | 风险扣分 | 5 | 最大回撤、开板次数、振幅 |
-# 
-# ### 分类规则
-# - **强势股**：score ≥ 70，价格多数时间 > 涨停价，未跌破-3%
-# - **平稳股**：40 ≤ score < 70，价格围绕涨停价波动
-# - **弱势股**：score < 40，快速跌破涨停价，跌破-3%
-# 
-# ---
-
-# ## 1. 环境导入
-
-# In[3]:
-
-
 import pandas as pd
 import numpy as np
 import datetime as dt
@@ -103,6 +57,9 @@ CONFIG = {
         'capital_flow': 15,
         'fundamental': 10,
         'risk_deduction': 5,
+        'volume_surge': 5,
+        'short_term_gene': 5,
+        'hot_sector': 5,
     }
 }
 
@@ -144,6 +101,11 @@ FACTOR_NAME_CN = {
     'factor_seal_amount': '封单金额',
     'factor_seal_ratio': '封单比例',
     'factor_days_boards': '连板数',
+    # ---- 新增因子 ----
+    'factor_volume_surge': '放量首板量比',
+    'factor_volume_surge_flag': '放量首板标记',
+    'factor_short_term_gene': '短线基因',
+    'factor_hot_sector': '热点板块涨停数',
 }
 
 # ============================================================================
@@ -172,6 +134,10 @@ COLUMN_NAME_CN = {
     # 预测
     'entry_index': '建仓指数', 'prediction': '预测', 'signal': '信号',
     'buy_price': '建议买入价', 'stop_loss': '止损价', 'target_price': '目标价',
+    # 新增评分维度
+    'volume_surge_score': '放量首板分', 'short_term_gene_score': '短线基因分', 'hot_sector_score': '热点板块分',
+    'factor_volume_surge': '放量首板量比', 'factor_volume_surge_flag': '放量首板标记',
+    'factor_short_term_gene': '短线基因', 'factor_hot_sector': '热点板块涨停数',
 }
 
 print('因子中文名映射 & 列名中文映射已加载')
@@ -1390,7 +1356,130 @@ def calc_factors(price_df):
     df['factor_days_boards'] = _safe_get(df, 'days_boards', np.nan)
     df['factor_first_zt_time'] = _safe_get(df, 'first_zt_time', np.nan)
 
-    print(f"[calc_factors] 因子计算完成")
+    # 封板速度: first_zt_time → elapsed_minutes → 330 - elapsed (越早封板值越大)
+    if 'first_zt_time' in df.columns:
+        _zt_time = _safe_series(df, 'first_zt_time')
+        try:
+            def _parse_zt_time_to_minutes(val):
+                """将涨停时间字符串转为距开盘的分钟数，越早封板值越大"""
+                if pd.isna(val) or not isinstance(val, str) or ':' not in val:
+                    return np.nan
+                try:
+                    parts = val.strip().split(':')
+                    hour, minute = int(parts[0]), int(parts[1])
+                    total_minutes = hour * 60 + minute
+                    open_minutes = 9 * 60 + 30  # 09:30 开盘
+                    elapsed = total_minutes - open_minutes
+                    if elapsed < 0:
+                        elapsed = 0  # 集合竞价涨停
+                    return float(elapsed)
+                except (ValueError, IndexError):
+                    return np.nan
+
+            _elapsed_minutes = _zt_time.apply(_parse_zt_time_to_minutes)
+            # 反转：越早封板，factor_seal_speed 越大 (330-elapsed)
+            df['factor_seal_speed'] = 330.0 - _elapsed_minutes
+            df.loc[_elapsed_minutes.isna(), 'factor_seal_speed'] = np.nan
+        except Exception:
+            df['factor_seal_speed'] = np.nan
+    else:
+        df['factor_seal_speed'] = np.nan
+
+    # 封流比: 封单金额 / 流通市值 — 封板强度相对流通盘的占比
+    if 'seal_amount' in df.columns and 'float_market_cap' in df.columns:
+        _seal = _safe_series(df, 'seal_amount').astype(float, errors='ignore')
+        _float_mcap = _safe_series(df, 'float_market_cap').astype(float, errors='ignore').replace(0, np.nan)
+        try:
+            df['factor_seal_float_ratio'] = _seal / _float_mcap
+            df['factor_seal_float_ratio'] = df['factor_seal_float_ratio'].replace([np.inf, -np.inf], np.nan)
+        except Exception:
+            df['factor_seal_float_ratio'] = np.nan
+    else:
+        df['factor_seal_float_ratio'] = np.nan
+
+    # ---- 4.8 放量首板因子 ----
+    # 条件：成交量 > 过去5日均量 × 1.5 且 < 过去5日均量 × 3
+    # vol_ratio = 当日成交量 / 过去5日均量，可直接使用
+    _vr_surge = _safe_series(df, 'vol_ratio').astype(float, errors='ignore')
+    df['factor_volume_surge'] = _vr_surge  # 连续值，用于相关性/IC 分析
+    df['factor_volume_surge_flag'] = 0      # 二值标记：1=满足放量首板条件
+    valid_vr = _vr_surge.notna() & (_vr_surge > 0)
+    df.loc[valid_vr & (_vr_surge >= 1.5) & (_vr_surge < 3.0), 'factor_volume_surge_flag'] = 1
+
+    # ---- 4.9 短线基因因子（最近1-2个月有涨停/炸板） ----
+    # 使用 zt_days_ytd（今年累计涨停天数）和 zt_open_count（开板次数）作为代理指标
+    # zt_days_ytd 越大说明近期涨停越频繁，短线基因越强
+    # zt_open_count > 0 说明有过炸板经历，也是短线活跃的标志
+    _zt_ytd = _safe_series(df, 'zt_days_ytd').astype(float, errors='ignore').fillna(0)
+    _zt_open = _safe_series(df, 'zt_open_count').astype(float, errors='ignore').fillna(0)
+    # 短线基因得分 = 涨停天数贡献 + 炸板历史贡献
+    gene_score = np.zeros(len(df))
+    gene_score += np.where(_zt_ytd >= 5, 2.0,
+                  np.where(_zt_ytd >= 3, 1.5,
+                  np.where(_zt_ytd >= 1, 1.0, 0.0)))
+    gene_score += np.where(_zt_open >= 2, 1.0,
+                  np.where(_zt_open >= 1, 0.5, 0.0))
+    df['factor_short_term_gene'] = gene_score
+
+    # ---- 4.10 热点板块因子（行业涨停家数 ≥ 10） ----
+    # 统计同行业内在当前涨停池中的股票数量
+    if 'industry' in df.columns:
+        _industry = _safe_series(df, 'industry').astype(str)
+        industry_zt_counts = _industry.value_counts()
+        df['factor_hot_sector'] = _industry.map(industry_zt_counts).fillna(0).astype(float)
+    else:
+        df['factor_hot_sector'] = 0.0
+        print("[calc_factors] 无 industry 列，热点板块因子设为 0")
+
+    # ---- 4.11 一进二因子 (zt_2nd_board) ----
+    # 综合评估首板股次日连板概率，100分制:
+    #   30pts 涨停时间 + 20pts 封单强度 + 20pts 封板稳定 + 20pts 放量 + 10pts 换手
+    _seal_speed = _safe_series(df, 'factor_seal_speed').astype(float, errors='ignore')
+    _seal_float_r = _safe_series(df, 'factor_seal_float_ratio').astype(float, errors='ignore')
+    _zt_open_cnt = _safe_series(df, 'zt_open_count').astype(float, errors='ignore').fillna(0)
+    _vol_r = _safe_series(df, 'vol_ratio').astype(float, errors='ignore')
+    _turnover = _safe_series(df, 'turnover_rate').astype(float, errors='ignore')
+
+    zt_2nd = np.zeros(len(df))
+
+    # (a) 涨停时间分 (0-30): seal_speed 越大=封板越早
+    #   seal_speed = 330 - elapsed_minutes; 330=开盘即封, 240=10:30前, 120=午后
+    zt_2nd += np.where(_seal_speed >= 300, 30,                # 开盘30分钟内封板
+              np.where(_seal_speed >= 240, 25,                # 10:30前封板
+              np.where(_seal_speed >= 180, 20,                # 11:00前封板
+              np.where(_seal_speed >= 120, 12,                # 午后封板
+              np.where(_seal_speed >= 60,  6,                 # 尾盘封板
+              np.where(_seal_speed.notna(), 3, 0))))))        # 其他有值但很晚
+
+    # (b) 封单强度分 (0-20): seal_amount / float_market_cap
+    zt_2nd += np.where(_seal_float_r >= 0.10, 20,            # 封单占流通盘10%+
+              np.where(_seal_float_r >= 0.05, 16,             # 5%-10%
+              np.where(_seal_float_r >= 0.02, 12,             # 2%-5%
+              np.where(_seal_float_r >= 0.005, 6,             # 0.5%-2%
+              np.where(_seal_float_r.notna(), 2, 0)))))       # 有值但很低
+
+    # (c) 封板稳定分 (0-20): zt_open_count 越少越稳
+    zt_2nd += np.where(_zt_open_cnt == 0, 20,                 # 一字板/秒板，从未开板
+              np.where(_zt_open_cnt == 1, 12,                  # 开过1次
+              np.where(_zt_open_cnt == 2, 5,                   # 开过2次
+              0)))                                              # 开过3次+
+
+    # (d) 放量程度分 (0-20): vol_ratio 适度放量最佳
+    zt_2nd += np.where((_vol_r >= 1.5) & (_vol_r < 3.0), 20, # 适度放量 [1.5, 3.0)
+              np.where((_vol_r >= 1.2) & (_vol_r < 1.5), 14,  # 温和放量
+              np.where((_vol_r >= 1.0) & (_vol_r < 1.2), 10,  # 略微放量
+              np.where((_vol_r >= 3.0) & (_vol_r < 5.0), 8,   # 放量过大（可能出货）
+              np.where(_vol_r.notna(), 3, 0)))))               # 缩量或其他
+
+    # (e) 换手率分 (0-10): 适度换手最佳
+    zt_2nd += np.where((_turnover >= 5) & (_turnover <= 15), 10,  # 最佳换手区间
+              np.where((_turnover >= 3) & (_turnover < 5), 7,      # 偏低
+              np.where((_turnover > 15) & (_turnover <= 20), 6,    # 偏高
+              np.where(_turnover.notna(), 3, 0))))                 # 极端或其他
+
+    df['factor_zt_2nd_board'] = zt_2nd
+
+    print(f"[calc_factors] 因子计算完成（含6个新增因子：放量首板/短线基因/热点板块/封板速度/封流比/一进二）")
 
     return df
 
@@ -1623,13 +1712,17 @@ def score_stock(factor_df):
     """
     构建评分模型，对每只股票打分（0~100）。
 
-    评分维度：
+    评分维度（10维）：
       1. 价格强度（30分）
       2. 趋势结构（20分）
       3. 成交量（20分）
       4. 资金（15分）
       5. 基本面（10分）
       6. 风险扣分（5分）
+      7. 放量首板加分（5分）
+      8. 短线基因加分（5分）
+      9. 热点板块加分（3分）
+     10. 一进二因子加分（28分）
     """
     print(f"[score_stock] 开始评分")
 
@@ -1883,9 +1976,68 @@ def score_stock(factor_df):
         if amp > 10:
             risk_deduction += 1
 
+        # ======== 7. 放量首板加分（5分）========
+        volume_surge_score = 0
+
+        surge_flag = row.get('factor_volume_surge_flag', 0)
+        if pd.isna(surge_flag):
+            surge_flag = 0
+        surge_vr = row.get('factor_volume_surge', np.nan)
+
+        if surge_flag == 1:
+            # 满足放量首板条件：量比在 [1.5, 3.0) 区间
+            volume_surge_score += 3
+            # 量比越接近2.0（适度放量）加分越多
+            if not pd.isna(surge_vr):
+                if 1.8 <= surge_vr <= 2.5:
+                    volume_surge_score += 2  # 最佳放量区间
+                elif 1.5 <= surge_vr < 1.8 or 2.5 < surge_vr < 3.0:
+                    volume_surge_score += 1
+        elif not pd.isna(surge_vr) and surge_vr >= 3.0:
+            # 放量过大（量比≥3），可能主力出货，不加分
+            volume_surge_score += 0
+
+        # ======== 8. 短线基因加分（5分）========
+        short_term_gene_score = 0
+
+        gene_val = row.get('factor_short_term_gene', 0)
+        if pd.isna(gene_val):
+            gene_val = 0
+        if gene_val >= 2.5:
+            short_term_gene_score += 5
+        elif gene_val >= 1.5:
+            short_term_gene_score += 3
+        elif gene_val >= 1.0:
+            short_term_gene_score += 2
+        elif gene_val > 0:
+            short_term_gene_score += 1
+
+        # ======== 9. 热点板块加分（3分）========
+        hot_sector_score = 0
+
+        hot_count = row.get('factor_hot_sector', 0)
+        if pd.isna(hot_count):
+            hot_count = 0
+        if hot_count >= 10:
+            hot_sector_score += 3   # 行业涨停≥10，强热点
+        elif hot_count >= 5:
+            hot_sector_score += 2   # 行业涨停≥5，中等热点
+        elif hot_count >= 3:
+            hot_sector_score += 1   # 行业涨停≥3，弱热点
+
+        # ======== 10. 一进二因子加分（28分）========
+        zt_2nd_board_score = 0
+        zt_2nd_raw = row.get('factor_zt_2nd_board', 0)
+        if pd.isna(zt_2nd_raw):
+            zt_2nd_raw = 0
+        # factor_zt_2nd_board 是0-100分制的因子值，按权重28/100映射
+        zt_2nd_board_score = zt_2nd_raw * 28 / 100
+
         # ======== 总分 ========
         total_score = (price_score + trend_score + vol_score +
-                       capital_score + fund_score - risk_deduction)
+                       capital_score + fund_score - risk_deduction +
+                       volume_surge_score + short_term_gene_score +
+                       hot_sector_score + zt_2nd_board_score)
         total_score = max(0, min(100, total_score))
 
         scores.append({
@@ -1895,6 +2047,10 @@ def score_stock(factor_df):
             'capital_score': capital_score,
             'fund_score': fund_score,
             'risk_deduction': risk_deduction,
+            'volume_surge_score': volume_surge_score,
+            'short_term_gene_score': short_term_gene_score,
+            'hot_sector_score': hot_sector_score,
+            'zt_2nd_board_score': zt_2nd_board_score,
             'total_score': total_score,
         })
 
@@ -1922,9 +2078,11 @@ def predict_next_day(scored_df):
     """
     基于当前收盘情况，预测未来一天可建仓的股票。
 
-    预测逻辑：
+    预测逻辑（一进二策略加权）：
     1. 从已评分股票中筛选候选（强势/平稳 + 未破防守线）
-    2. 综合评分 + 技术面 + 资金面 + 涨停特征，计算"次日建仓指数"
+    2. 计算次日建仓指数:
+       entry_index = 55%*zt_2nd_board + 20%*volume + 15%*capital + 10%*trend
+       硬门槛: factor_zt_2nd_board < 60 → entry_index = 0
     3. 输出：主选标的、候补标的、建议买入价、止损价、目标价
 
     Parameters
@@ -1950,108 +2108,56 @@ def predict_next_day(scored_df):
         return pd.DataFrame()
 
     # ---- 计算次日建仓指数 (0~100) ----
+    # 一进二策略: entry_index = 55%*zt_2nd_board + 20%*volume + 15%*capital + 10%*trend
+    # 硬门槛: factor_zt_2nd_board < 60 → entry_index = 0
+    _EI_WEIGHTS = {'zt_2nd_board': 0.55, 'volume': 0.20, 'capital_flow': 0.15, 'trend': 0.10}
+    _ZT_2ND_MIN_SCORE = 60
     predict_scores = []
 
     for idx, row in candidates.iterrows():
-        # === 1. 综合评分权重 (40分) ===
-        total_score = row.get('total_score', 0)
-        if pd.isna(total_score):
-            total_score = 0
-        score_component = min(total_score / 100 * 40, 40)
+        # === 1. 一进二因子权重 (55%) ===
+        zt_2nd_raw = row.get('factor_zt_2nd_board', 0)
+        if pd.isna(zt_2nd_raw):
+            zt_2nd_raw = 0
 
-        # === 2. 价格位置权重 (20分) ===
-        # 收盘价相对涨停价的位置
-        price_component = 0
-        ratio_above_zt = row.get('ratio_above_zt', 0)
-        if pd.isna(ratio_above_zt):
-            ratio_above_zt = 0
-
-        if ratio_above_zt >= 0.8:
-            price_component = 20  # 大部分时间在涨停价上方
-        elif ratio_above_zt >= 0.6:
-            price_component = 16
-        elif ratio_above_zt >= 0.4:
-            price_component = 12
-        elif ratio_above_zt >= 0.2:
-            price_component = 8
+        # 硬门槛: 一进二因子原始值 < 阈值则不建仓
+        if zt_2nd_raw < _ZT_2ND_MIN_SCORE:
+            entry_index = 0
+            vol_s = 0
+            cap_s = 0
+            trend_s = 0
         else:
-            price_component = 4
+            # === 2. 成交量权重 (20%) ===
+            vol_s = row.get('vol_score', 0)
+            if pd.isna(vol_s):
+                vol_s = 0
+            vol_normalized = vol_s / 12 * 100  # vol_score 0-12 → 0-100
 
-        # === 3. 防守线权重 (15分) ===
-        defense_component = 0
-        ratio_above_defense = row.get('ratio_above_defense', 0)
-        if pd.isna(ratio_above_defense):
-            ratio_above_defense = 0
+            # === 3. 资金权重 (15%) ===
+            cap_s = row.get('capital_score', 0)
+            if pd.isna(cap_s):
+                cap_s = 0
+            cap_normalized = cap_s / 10 * 100  # capital_score 0-10 → 0-100
 
-        if ratio_above_defense >= 0.8:
-            defense_component = 15
-        elif ratio_above_defense >= 0.6:
-            defense_component = 12
-        elif ratio_above_defense >= 0.4:
-            defense_component = 8
-        else:
-            defense_component = 3
+            # === 4. 趋势权重 (10%) ===
+            trend_s = row.get('trend_score', 0)
+            if pd.isna(trend_s):
+                trend_s = 0
+            trend_normalized = trend_s / 12 * 100  # trend_score 0-12 → 0-100
 
-        # === 4. 资金面权重 (15分) ===
-        capital_component = 0
-        main_net = row.get('main_net_inflow', 0)
-        if pd.isna(main_net):
-            main_net = 0
-        main_pct = row.get('main_net_pct', 0)
-        if pd.isna(main_pct):
-            main_pct = 0
+            entry_index = (_EI_WEIGHTS['zt_2nd_board'] * zt_2nd_raw +
+                           _EI_WEIGHTS['volume'] * vol_normalized +
+                           _EI_WEIGHTS['capital_flow'] * cap_normalized +
+                           _EI_WEIGHTS['trend'] * trend_normalized)
 
-        if main_net > 0 and main_pct > 0:
-            capital_component = 15
-        elif main_net > 0:
-            capital_component = 10
-        elif main_net > -5e7:
-            capital_component = 6
-        else:
-            capital_component = 2
-
-        # === 5. 涨停特征权重 (10分) ===
-        zt_feature_component = 0
-        # 封成比越高越好
-        seal_ratio = row.get('seal_volume_ratio', 0)
-        if pd.isna(seal_ratio):
-            seal_ratio = 0
-        # 开板次数越少越好
-        zt_open = row.get('zt_open_count', 0)
-        if pd.isna(zt_open):
-            zt_open = 0
-        # 连板数
-        consec_up = row.get('consecutive_up', 0)
-        if pd.isna(consec_up):
-            consec_up = 0
-
-        if seal_ratio > 5:
-            zt_feature_component += 4
-        elif seal_ratio > 2:
-            zt_feature_component += 3
-        elif seal_ratio > 0:
-            zt_feature_component += 2
-
-        if zt_open == 0:
-            zt_feature_component += 4
-        elif zt_open == 1:
-            zt_feature_component += 2
-        else:
-            zt_feature_component += 0
-
-        if consec_up >= 3:
-            zt_feature_component += 2
-        elif consec_up >= 2:
-            zt_feature_component += 1
-
-        zt_feature_component = min(zt_feature_component, 10)
-
-        # === 汇总建仓指数 ===
-        entry_index = score_component + price_component + defense_component + capital_component + zt_feature_component
         entry_index = max(0, min(100, entry_index))
 
         # === 计算建议买入价、止损价、目标价 ===
         zt_close = row.get('zt_close', np.nan)
+        total_score = row.get('total_score', 0)
+        if pd.isna(total_score):
+            total_score = 0
+
         if pd.isna(zt_close) or zt_close <= 0:
             buy_price = np.nan
             stop_loss = np.nan
@@ -2063,7 +2169,7 @@ def predict_next_day(scored_df):
             else:
                 buy_price = zt_close * 0.98  # 平稳股等回踩买入
 
-            # 止损价：涨停价 * 0.97（-3%防守线）
+            # 一进二止损: -3%
             stop_loss = zt_close * 0.97
 
             # 目标价：根据评分推算预期收益
@@ -2090,11 +2196,10 @@ def predict_next_day(scored_df):
 
         predict_scores.append({
             'entry_index': entry_index,
-            'score_component': score_component,
-            'price_component': price_component,
-            'defense_component': defense_component,
-            'capital_component': capital_component,
-            'zt_feature_component': zt_feature_component,
+            'zt_2nd_component': zt_2nd_raw,
+            'vol_component': vol_s if zt_2nd_raw >= _ZT_2ND_MIN_SCORE else 0,
+            'capital_component': cap_s if zt_2nd_raw >= _ZT_2ND_MIN_SCORE else 0,
+            'trend_component': trend_s if zt_2nd_raw >= _ZT_2ND_MIN_SCORE else 0,
             'buy_price': round(buy_price, 2) if not pd.isna(buy_price) else np.nan,
             'stop_loss': round(stop_loss, 2) if not pd.isna(stop_loss) else np.nan,
             'target_price': round(target_price, 2) if not pd.isna(target_price) else np.nan,
@@ -2151,6 +2256,9 @@ def correlation_analysis(scored_df):
         'factor_pe', 'factor_roe', 'factor_profit_yoy', 'factor_gross_margin',
         'factor_max_drawdown', 'factor_zt_open_count', 'factor_amplitude',
         'factor_seal_amount', 'factor_seal_ratio', 'factor_days_boards',
+        # 新增因子
+        'factor_volume_surge', 'factor_volume_surge_flag',
+        'factor_short_term_gene', 'factor_hot_sector',
     ]
 
     # 目标变量
@@ -2227,6 +2335,9 @@ def factor_effectiveness_analysis(scored_df):
         'factor_pe', 'factor_roe', 'factor_profit_yoy', 'factor_gross_margin',
         'factor_max_drawdown', 'factor_zt_open_count', 'factor_amplitude',
         'factor_seal_amount', 'factor_seal_ratio', 'factor_days_boards',
+        # 新增因子
+        'factor_volume_surge', 'factor_volume_surge_flag',
+        'factor_short_term_gene', 'factor_hot_sector',
     ]
 
     # 目标变量
@@ -2771,6 +2882,7 @@ demo_data = {
     '封流比%': [20.0, 10.0, 25.0, 5.0, 30.0, 15.0, 8.0, 35.0, 3.0, 22.0],
     '涨停开板次数': [0, 0, 0, 2, 0, 0, 1, 0, 3, 0],
     '今年累计涨停天数': [5, 3, 8, 4, 12, 2, 3, 1, 6, 10],
+    '所属行业': ['银行', '银行', '白酒', '电子', '新能源', '保险', '家电', '白酒', '农业', '券商'],
     '几天几板': ['1天1板', '2天2板', '1天1板', '1天1板', '3天3板', '1天1板', '1天1板', '1天1板', '1天1板', '2天2板'],
     '竞价涨幅%': [2.0, -1.0, 3.0, 0.5, 5.0, 1.5, -0.5, 0.8, -2.0, 3.5],
     '竞价换手率%': [0.3, 0.1, 0.2, 0.4, 0.5, 0.2, 0.3, 0.05, 0.6, 0.8],
