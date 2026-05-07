@@ -60,7 +60,7 @@ except ImportError:
 # ============================================================================
 
 STRATEGY_CONFIG = {
-    'strategy_version': 'v11_regime_adaptive_hot_rotation',
+    'strategy_version': 'v20_emotion_ignition_core_absorb',
     # --- 股票池 ---
     'pool_max_size': 100,           # 股票池最大容量
     'pool_zt_expire_days': 10,      # ZT日超过此天数则淘汰
@@ -86,7 +86,7 @@ STRATEGY_CONFIG = {
     'v8_hot_pool_signal_top_n': 8,
     'v8_allow_low_open_memory_states': ['CORE_LEADER', 'HOT_CONTINUE', 'TREND'],
     'v8_low_open_min_ret': -0.035,
-    'v8_low_open_min_strength': -0.018,
+    'v8_low_open_min_strength': -0.020,
     'min_list_days': 63,            # 上市不足此天数则过滤 (约3个月)
 
     # --- 建仓 ---
@@ -107,12 +107,27 @@ STRATEGY_CONFIG = {
     'v11_relay_recent_good_avg_pnl': 0.012,   # 最近接力平均收益高于1.2%，视为接力有效
     'v11_trend_disable_top1_tick': True,      # 趋势指数市禁用Top1打板
     'v11_trend_max_score_buys': 1,
-    'v11_trend_score_buy_position_ratio': 0.38, # 趋势市SCORE_BUY降仓，单票约9.5%总资产
-    'v11_trend_min_total_score': 55,
-    'v11_trend_min_entry_index': 60,
+    'v11_trend_score_buy_position_ratio': 0.62, # v14：趋势市核心低吸仓位提高，单票约15.5%总资产
+    'v11_trend_min_total_score': 52,
+    'v11_trend_min_entry_index': 58,
     'v11_trend_max_0931_ret': 0.045,          # 趋势市不追高，超过4.5%不买
+    'v14_trend_min_0931_ret': -0.006,        # v14：趋势市低吸允许小幅水下核心股，不再要求+0.6%
     'v11_relay_weak_no_new_buy': True,
     'v11_runner_only_relay_market': True,
+
+    # --- v13 Guarded Hybrid ---
+    # v12把rawZT>=100的指数趋势市全部放成HYBRID，并且只做多tick打板，回测变差。
+    # v13退回v11的防守框架，只在“指数趋势+短线极热+情绪HOT”的共振日，开放一个小仓位Top1试探；
+    # 同时仍保留v11的趋势低吸，避免错过真正可成交的低吸机会。
+    'v13_enable_guarded_hybrid': True,
+    'v14_hybrid_rawzt_threshold': 130,
+    'v14_hybrid_require_emotion_hot': True,
+    'v14_hybrid_tick_candidate_n': 1,
+    'v14_hybrid_min_entry_index': 60,
+    'v14_hybrid_min_total_score': 42,
+    'v14_hybrid_min_hot_score': 130,
+    'v14_hybrid_max_score_buys': 1,
+    'v14_hybrid_top1_position_ratio': 0.50,
     # --- 一进二打板增强参数（盘后选股 + 次日盘中确认，避免未来函数）---
     'one_two_min_score': 50,          # 回测版放宽：低于此值不直接硬剔除，而用于软惩罚
     'one_two_core_score': 75,
@@ -143,11 +158,110 @@ STRATEGY_CONFIG = {
 
     # --- v7 买入质量增强 ---
     # 目的：保留v6.5交易活跃度，但过滤掉09:31弱转强失败、刚亏损过的重复买入票。
-    'score_buy_min_open_strength': 0.0,          # v10：普通票不要求必须高于开盘0.2%，避免过滤掉低开转强核心
+    'score_buy_min_open_strength': 0.0,          # 普通票仍要求不弱于开盘
+    'v14_core_min_open_strength': -0.018,      # v14：CORE/HOT核心低吸允许开盘后小幅回落，不再错过强趋势核心
+    # --- v15 后半段行情再入场模块 ---
+    # 解决 v14 在上涨后半段因 RELAY_WEAK/TREND_INDEX 过度防守而长期空仓的问题。
+    'v15_enable_late_rebound': True,
+    'v15_rebound_rawzt_min': 55,
+    'v15_rebound_index_ret5_min': 0.012,
+    'v15_rebound_index_ret20_min': -0.015,
+    'v15_rebound_max_score_buys': 1,
+    'v15_rebound_min_total_score': 45,
+    'v15_rebound_min_entry_index': 52,
+    'v15_rebound_min_hot_score': 80,
+    'v15_rebound_min_0931_ret': -0.004,
+    'v15_rebound_max_0931_ret': 0.055,
+    'v15_rebound_score_buy_position_ratio': 0.58,
+
+    # --- v16 龙头衰退退出模块 ---
+    # v15 已解决后半段空仓问题；v16 重点控制利润回吐：热点衰退、排名掉队、动态利润保护。
+    'v16_enable_runner_decay_exit': True,
+    'v16_hot_score_decay_pct': 0.12,          # 单日hot_score较上次记录下降超过12%，记一次衰退
+    'v16_hot_decay_days_to_exit': 2,          # 连续2次衰退后，不再继续利润奔跑
+    'v16_runner_rank_exit_threshold': 8,      # 核心票跌出热点Top8，视为龙头地位下降
+    'v16_runner_rank_warn_threshold': 5,      # 跌出Top5后收紧保护
+    'v16_decay_exit_min_profit': 0.018,       # 有利润时才用衰退退出，避免低位反复割肉
+    'v16_decay_exit_min_max_profit': 0.035,   # 曾浮盈达到3.5%后才启动衰退退出
+    'v16_dynamic_trail_enabled': True,
+    'v16_runner_dd_after_3pct': 0.018,        # 曾浮盈3%+，允许从高点回撤1.8%
+    'v16_runner_dd_after_5pct': 0.024,
+    'v16_runner_dd_after_8pct': 0.035,
+    'v16_runner_dd_after_12pct': 0.050,
+    'v16_runner_min_hold_for_decay_exit': 2,
+
+
+    # --- v18 情绪优先市场状态引擎 ---
+    # v16/v17 的问题：指数仍弱时容易长期 ICE，错过“冰点后情绪修复主升”。
+    # v18 让短线情绪优先于指数：指数弱 + 情绪强 => REBOUND_RELAY / MAIN_UPTREND，而不是 ICE。
+    'v18_enable_emotion_first_regime': True,
+    'v18_rebound_rawzt_min': 70,
+    'v18_rebound_core_min': 3,
+    'v18_rebound_hot_continue_min': 5,
+    'v18_rebound_top_hot_min': 80,
+    'v18_rebound_top_entry_min': 58,
+    'v18_rebound_idx5_min': -0.065,
+    'v18_rebound_idx20_min': -0.085,
+    'v18_main_rawzt_min': 90,
+    'v18_main_core_min': 6,
+    'v18_main_top_hot_min': 105,
+    'v18_main_top_entry_min': 62,
+    'v18_main_max_score_buys': 2,
+    'v18_rebound_max_score_buys': 1,
+    'v18_rebound_min_total_score': 42,
+    'v18_rebound_min_entry_index': 52,
+    'v18_rebound_min_hot_score': 70,
+    'v18_rebound_min_0931_ret': -0.018,
+    'v18_rebound_max_0931_ret': 0.065,
+    'v18_rebound_score_buy_position_ratio': 0.65,
+    'v18_main_score_buy_position_ratio': 0.72,
+    'v18_main_top1_position_ratio': 1.15,
+    'v18_rebound_top1_position_ratio': 0.90,
+    'v18_ice_rawzt_hard_min': 45,
+    'v18_ice_top_hot_max': 55,
+    'v18_ice_core_max': 1,
+    'v18_temperature_ice': 25,
+    'v18_temperature_rebound': 42,
+    'v18_temperature_main': 58,
+
+    # --- v20 情绪点火确认引擎 ---
+    # v18解决了“会不会进场”，但过早、过宽，导致弱修复日噪音交易太多。
+    # v20在情绪点火早期只做核心低吸，主升确认后才开放Top1；降低错过1月/4月修复行情。
+    'v19_enable_confirmed_rebound': True,
+    'v19_rebound_rawzt_min': 70,
+    'v19_rebound_core_min': 3,
+    'v19_rebound_hot_continue_min': 3,
+    'v19_rebound_top_hot_min': 80,
+    'v19_rebound_top_entry_min': 58,
+    'v19_rebound_temperature_min': 68,
+    'v19_rebound_idx5_min': -0.070,
+    'v19_rebound_idx20_min': -0.12,
+    'v19_rebound_disable_top1': True,
+    'v19_rebound_max_score_buys': 1,
+    'v19_rebound_min_total_score': 50,
+    'v19_rebound_min_entry_index': 59,
+    'v19_rebound_min_hot_score': 80,
+    'v19_rebound_min_0931_ret': -0.025,
+    'v19_rebound_max_0931_ret': 0.030,
+    'v19_rebound_score_buy_position_ratio': 0.52,
+    'v19_main_rawzt_min': 95,
+    'v19_main_core_min': 7,
+    'v19_main_top_hot_min': 115,
+    'v19_main_top_entry_min': 63,
+    'v19_main_temperature_min': 82,
+    'v19_main_max_score_buys': 1,
+    'v19_main_top1_position_ratio': 0.80,
+    'v19_main_score_buy_position_ratio': 0.55,
+    # --- v20 情绪点火早期：只核心低吸，不追板 ---
+    'v20_ignition_disable_top1': True,
+    'v20_ignition_core_only': True,
+    'v20_rebound_prefer_low_absorb': True,
+    'v20_runner_core_only': True,
+
     'score_buy_weak_reversal_open_strength': 0.004, # v10：深水票仍需反包，但不过度严苛
     'score_buy_loss_cooldown_days': 5,           # v9：亏损票冷却更久，减少重复试错
     'score_buy_low_quality_entry_index': 58,     # v10：低分票更严格，高分/核心票放行
-    'score_buy_low_quality_total_score': 38,     # v9：提高低质量判定线
+    'score_buy_low_quality_total_score': 36,     # v9：提高低质量判定线
     'top1_reseal_mode': False,
     'trend_hold_min_days': 2,
     'trend_allow_low_open_reversal': True,
@@ -177,7 +291,7 @@ STRATEGY_CONFIG = {
     'risk_check_times': ['09:35', '10:30', '11:25', '14:00', '14:50'],
     'profit_protect_min_pct': 0.06,       # v7: 浮盈超过3%后启用利润保护
     'profit_protect_drawdown_pct': 0.025,  # 普通票仍严格保护；v10长效龙头使用独立利润奔跑参数
-    'runner_hot_score_min': 120,          # v10：长效利润候选：热点记忆分阈值
+    'runner_hot_score_min': 140,          # v10：长效利润候选：热点记忆分阈值
     'runner_entry_index_min': 62,         # v10：长效利润候选：建仓指数阈值
     'runner_total_score_min': 45,         # v10：长效利润候选：总评分阈值
     'runner_min_hold_days': 3,            # v10：长效龙头最少观察持有天数，避免T+1洗盘卖飞
@@ -2201,15 +2315,66 @@ def generate_entry_signals(context, predict_df: pd.DataFrame) -> Dict:
         log.info(f"[generate_entry_signals] v11市场状态={regime}，停止新增信号")
         return signals
 
-    # v11：指数趋势市不做Top1打板；Top1也必须转成SCORE_BUY趋势低吸，且后续由09:31二次过滤。
-    if regime == 'TREND_INDEX':
-        min_total = float(STRATEGY_CONFIG.get('v11_trend_min_total_score', 55) or 55)
-        min_entry = float(STRATEGY_CONFIG.get('v11_trend_min_entry_index', 60) or 60)
-        df = df[(df['total_score'] >= min_total) & (df['entry_index'] >= min_entry)].copy()
-        if df.empty:
-            log.info(f"[generate_entry_signals] v11趋势指数市无合格趋势低吸候选 total>={min_total}, entry>={min_entry}")
+    # v19：确认型情绪修复/主升。
+    # 关键修正：REBOUND_RELAY 不再追Top1涨停，只做核心低吸；MAIN_UPTREND 才允许Top1。
+    if regime in ('REBOUND_RELAY', 'MAIN_UPTREND'):
+        df['v8_hot_score'] = pd.to_numeric(df.get('v8_hot_score', 0), errors='coerce').fillna(0)
+        state_series = df.get('v8_hot_state', pd.Series('', index=df.index)).astype(str)
+        if regime == 'MAIN_UPTREND':
+            min_total = float(STRATEGY_CONFIG.get('v19_rebound_min_total_score', 55) or 55)
+            min_entry = float(STRATEGY_CONFIG.get('v19_main_top_entry_min', 64) or 64)
+            min_hot = float(STRATEGY_CONFIG.get('v19_main_top_hot_min', 125) or 125)
+        else:
+            min_total = float(STRATEGY_CONFIG.get('v19_rebound_min_total_score', 55) or 55)
+            min_entry = float(STRATEGY_CONFIG.get('v19_rebound_min_entry_index', 63) or 63)
+            min_hot = float(STRATEGY_CONFIG.get('v19_rebound_min_hot_score', 105) or 105)
+
+        rdf = df[(df['total_score'] >= min_total) &
+                 (df['entry_index'] >= min_entry) &
+                 (df['v8_hot_score'] >= min_hot) &
+                 (state_series.isin(['CORE_LEADER','HOT_CONTINUE']))].copy()
+        # v20：修复期优先CORE_LEADER，避免HOT_CONTINUE泛化太宽；若无CORE再用HOT_CONTINUE。
+        if regime == 'REBOUND_RELAY':
+            core_rdf = rdf[state_series.loc[rdf.index].isin(['CORE_LEADER'])].copy()
+            if not core_rdf.empty:
+                rdf = core_rdf
+
+        if rdf.empty:
+            log.info(f"[generate_entry_signals] v20 {regime} 无确认核心候选 total>={min_total}, entry>={min_entry}, hot>={min_hot}")
             return signals
-        for rank, (_, row) in enumerate(df.head(STRATEGY_CONFIG.get('v11_trend_max_score_buys', 1)).iterrows(), start=1):
+
+        rdf = rdf.sort_values(['entry_index', 'v8_hot_score', 'total_score'], ascending=False)
+
+        allow_top1_tick = (regime == 'MAIN_UPTREND' and not disable_top1)
+        if allow_top1_tick:
+            top1_row = rdf.iloc[0]
+            top1_code = top1_row.get('jq_code', '')
+            if top1_code:
+                signals[top1_code] = {
+                    'entry_type': 'TOP1_TICK',
+                    'rank': 1,
+                    'classification': top1_row.get('classification', ''),
+                    'signal': f'v20 {regime} 主升确认Top1 tick',
+                    'buy_price': top1_row.get('buy_price', np.nan),
+                    'stop_loss': top1_row.get('stop_loss', np.nan),
+                    'target_price': top1_row.get('target_price', np.nan),
+                    'entry_index': float(top1_row.get('entry_index', 0) or 0),
+                    'total_score': float(top1_row.get('total_score', 0) or 0),
+                    'v8_hot_state': top1_row.get('v8_hot_state', ''),
+                    'v8_hot_score': float(top1_row.get('v8_hot_score', 0) or 0),
+                    'v8_seen_count': int(top1_row.get('v8_seen_count', 0) or 0),
+                    'one_two_score': top1_row.get('one_two_score', 0),
+                    'one_two_rank_bucket': top1_row.get('one_two_rank_bucket', ''),
+                    'one_two_filter_reason': top1_row.get('one_two_filter_reason', ''),
+                    'intraday_plan': top1_row.get('intraday_plan', ''),
+                    'first_leg_done': False,
+                    'second_leg_done': True,
+                    'v20_confirmed_rebound': True,
+                }
+
+        max_buys = int(STRATEGY_CONFIG.get('v19_main_max_score_buys', 1) if regime == 'MAIN_UPTREND' else STRATEGY_CONFIG.get('v19_rebound_max_score_buys', 1))
+        score_rows = rdf[~rdf['jq_code'].isin(signals.keys())].head(max_buys)
+        for rank, (_, row) in enumerate(score_rows.iterrows(), start=2 if signals else 1):
             code = row.get('jq_code', '')
             if not code:
                 continue
@@ -2217,7 +2382,53 @@ def generate_entry_signals(context, predict_df: pd.DataFrame) -> Dict:
                 'entry_type': 'SCORE_BUY',
                 'rank': rank,
                 'classification': row.get('classification', ''),
-                'signal': f'v11趋势指数市Top{rank}低吸',
+                'signal': f'v20 {regime} 确认型核心低吸Top{rank}',
+                'buy_price': row.get('buy_price', np.nan),
+                'stop_loss': row.get('stop_loss', np.nan),
+                'target_price': row.get('target_price', np.nan),
+                'entry_index': float(row.get('entry_index', 0) or 0),
+                'total_score': float(row.get('total_score', 0) or 0),
+                'v8_hot_state': row.get('v8_hot_state', ''),
+                'v8_hot_score': float(row.get('v8_hot_score', 0) or 0),
+                'v8_seen_count': int(row.get('v8_seen_count', 0) or 0),
+                'one_two_score': row.get('one_two_score', 0),
+                'one_two_rank_bucket': row.get('one_two_rank_bucket', ''),
+                'one_two_filter_reason': row.get('one_two_filter_reason', ''),
+                'intraday_plan': row.get('intraday_plan', ''),
+                'first_leg_done': False,
+                'second_leg_done': True,
+                'v20_confirmed_rebound': True,
+            }
+        log.info(f"[generate_entry_signals] v20 {regime} 生成 {len(signals)} 个信号: { {v.get('entry_type'): list(s.get('entry_type') for s in signals.values()).count(v.get('entry_type')) for v in signals.values()} }")
+        return signals
+
+    # v11/v15：指数趋势市不做Top1打板；Top1也必须转成SCORE_BUY趋势低吸，且后续由09:31二次过滤。
+    if regime in ('TREND_INDEX', 'TREND_REBOUND'):
+        if regime == 'TREND_REBOUND':
+            min_total = float(STRATEGY_CONFIG.get('v15_rebound_min_total_score', 45) or 45)
+            min_entry = float(STRATEGY_CONFIG.get('v15_rebound_min_entry_index', 52) or 52)
+            min_hot = float(STRATEGY_CONFIG.get('v15_rebound_min_hot_score', 80) or 80)
+            df['v8_hot_score'] = pd.to_numeric(df.get('v8_hot_score', 0), errors='coerce').fillna(0)
+            state_series = df.get('v8_hot_state', pd.Series('', index=df.index)).astype(str)
+            df = df[(df['total_score'] >= min_total) & (df['entry_index'] >= min_entry) & ((df['v8_hot_score'] >= min_hot) | state_series.isin(['CORE_LEADER','HOT_CONTINUE']))].copy()
+        else:
+            min_total = float(STRATEGY_CONFIG.get('v11_trend_min_total_score', 55) or 55)
+            min_entry = float(STRATEGY_CONFIG.get('v11_trend_min_entry_index', 60) or 60)
+            df = df[(df['total_score'] >= min_total) & (df['entry_index'] >= min_entry)].copy()
+        if df.empty:
+            label = 'v15趋势修复' if regime == 'TREND_REBOUND' else 'v11趋势指数市'
+            log.info(f"[generate_entry_signals] {label}无合格趋势低吸候选 total>={min_total}, entry>={min_entry}")
+            return signals
+        max_buys = STRATEGY_CONFIG.get('v15_rebound_max_score_buys', 1) if regime == 'TREND_REBOUND' else STRATEGY_CONFIG.get('v11_trend_max_score_buys', 1)
+        for rank, (_, row) in enumerate(df.head(max_buys).iterrows(), start=1):
+            code = row.get('jq_code', '')
+            if not code:
+                continue
+            signals[code] = {
+                'entry_type': 'SCORE_BUY',
+                'rank': rank,
+                'classification': row.get('classification', ''),
+                'signal': f"{'v15趋势修复' if regime == 'TREND_REBOUND' else 'v11趋势指数市'}Top{rank}低吸",
                 'buy_price': row.get('buy_price', np.nan),
                 'stop_loss': row.get('stop_loss', np.nan),
                 'target_price': row.get('target_price', np.nan),
@@ -2233,33 +2444,70 @@ def generate_entry_signals(context, predict_df: pd.DataFrame) -> Dict:
                 'first_leg_done': False,
                 'second_leg_done': True,
             }
-        log.info(f"[generate_entry_signals] v11趋势指数市生成 {len(signals)} 个SCORE_BUY低吸信号，禁用Top1打板")
+        log.info(f"[generate_entry_signals] {regime}生成 {len(signals)} 个SCORE_BUY低吸信号，禁用Top1打板")
         return signals
 
-    # Top1：tick打板专用。即便 entry_index 略低，也允许“触板才买”，因为tick确认本身是强过滤。
-    top1_row = df.iloc[0]
-    top1_code = top1_row.get('jq_code', '')
-    if top1_code and not disable_top1:
-        signals[top1_code] = {
-            'entry_type': 'TOP1_TICK',
-            'rank': 1,
-            'classification': top1_row.get('classification', ''),
-            'signal': 'Top1 tick打板确认',
-            'buy_price': top1_row.get('buy_price', np.nan),
-            'stop_loss': top1_row.get('stop_loss', np.nan),
-            'target_price': top1_row.get('target_price', np.nan),
-            'entry_index': float(top1_row.get('entry_index', 0) or 0),
-            'total_score': float(top1_row.get('total_score', 0) or 0),
-            'v8_hot_state': top1_row.get('v8_hot_state', ''),
-            'v8_hot_score': float(top1_row.get('v8_hot_score', 0) or 0),
-            'v8_seen_count': int(top1_row.get('v8_seen_count', 0) or 0),
-            'one_two_score': top1_row.get('one_two_score', 0),
-            'one_two_rank_bucket': top1_row.get('one_two_rank_bucket', ''),
-            'one_two_filter_reason': top1_row.get('one_two_filter_reason', ''),
-            'intraday_plan': top1_row.get('intraday_plan', ''),
-            'first_leg_done': False,
-            'second_leg_done': True,
-        }
+    # v13 HYBRID_GUARDED：不是v12的多tick打板，只允许一个严格筛选的Top1试探；
+    # 同时继续保留后面的SCORE_BUY低吸补位，避免全天无交易。
+    if regime == 'HYBRID_GUARDED':
+        hdf = df.copy()
+        hdf['v8_hot_score'] = pd.to_numeric(hdf.get('v8_hot_score', 0), errors='coerce').fillna(0)
+        min_entry = float(STRATEGY_CONFIG.get('v14_hybrid_min_entry_index', 62) or 62)
+        min_total = float(STRATEGY_CONFIG.get('v14_hybrid_min_total_score', 45) or 45)
+        min_hot = float(STRATEGY_CONFIG.get('v14_hybrid_min_hot_score', 150) or 150)
+        hdf = hdf[(hdf['entry_index'] >= min_entry) & (hdf['total_score'] >= min_total) & (hdf['v8_hot_score'] >= min_hot)].copy()
+        if not hdf.empty and not disable_top1:
+            top1_row = hdf.sort_values(['entry_index', 'total_score', 'v8_hot_score'], ascending=False).iloc[0]
+            top1_code = top1_row.get('jq_code', '')
+            if top1_code:
+                signals[top1_code] = {
+                    'entry_type': 'TOP1_TICK',
+                    'rank': 1,
+                    'classification': top1_row.get('classification', ''),
+                    'signal': 'v14混合行情严格Top1小仓tick打板确认',
+                    'buy_price': top1_row.get('buy_price', np.nan),
+                    'stop_loss': top1_row.get('stop_loss', np.nan),
+                    'target_price': top1_row.get('target_price', np.nan),
+                    'entry_index': float(top1_row.get('entry_index', 0) or 0),
+                    'total_score': float(top1_row.get('total_score', 0) or 0),
+                    'v8_hot_state': top1_row.get('v8_hot_state', ''),
+                    'v8_hot_score': float(top1_row.get('v8_hot_score', 0) or 0),
+                    'v8_seen_count': int(top1_row.get('v8_seen_count', 0) or 0),
+                    'one_two_score': top1_row.get('one_two_score', 0),
+                    'one_two_rank_bucket': top1_row.get('one_two_rank_bucket', ''),
+                    'one_two_filter_reason': top1_row.get('one_two_filter_reason', ''),
+                    'intraday_plan': top1_row.get('intraday_plan', ''),
+                    'first_leg_done': False,
+                    'second_leg_done': True,
+                    'v14_guarded_hybrid': True,
+                }
+        else:
+            log.info(f"[generate_entry_signals] v14混合行情无严格tick候选 entry>={min_entry}, total>={min_total}, hot>={min_hot}")
+    else:
+        # Top1：tick打板专用。即便 entry_index 略低，也允许“触板才买”，因为tick确认本身是强过滤。
+        top1_row = df.iloc[0]
+        top1_code = top1_row.get('jq_code', '')
+        if top1_code and not disable_top1:
+            signals[top1_code] = {
+                'entry_type': 'TOP1_TICK',
+                'rank': 1,
+                'classification': top1_row.get('classification', ''),
+                'signal': 'Top1 tick打板确认',
+                'buy_price': top1_row.get('buy_price', np.nan),
+                'stop_loss': top1_row.get('stop_loss', np.nan),
+                'target_price': top1_row.get('target_price', np.nan),
+                'entry_index': float(top1_row.get('entry_index', 0) or 0),
+                'total_score': float(top1_row.get('total_score', 0) or 0),
+                'v8_hot_state': top1_row.get('v8_hot_state', ''),
+                'v8_hot_score': float(top1_row.get('v8_hot_score', 0) or 0),
+                'v8_seen_count': int(top1_row.get('v8_seen_count', 0) or 0),
+                'one_two_score': top1_row.get('one_two_score', 0),
+                'one_two_rank_bucket': top1_row.get('one_two_rank_bucket', ''),
+                'one_two_filter_reason': top1_row.get('one_two_filter_reason', ''),
+                'intraday_plan': top1_row.get('intraday_plan', ''),
+                'first_leg_done': False,
+                'second_leg_done': True,
+            }
 
     # Top2~5：保交易和稳定性，只看 entry_index >= 45；真正执行由 buy_score_candidates() 在09:31统一处理。
     for rank, (_, row) in enumerate(df.iloc[1:5].iterrows(), start=2):
@@ -2295,10 +2543,10 @@ def generate_entry_signals(context, predict_df: pd.DataFrame) -> Dict:
         for sig in signals.values():
             t = sig.get('entry_type', '')
             type_counts[t] = type_counts.get(t, 0) + 1
-        log.info(f"[generate_entry_signals] v8生成 {len(signals)} 个建仓信号: {type_counts}; "
-                 f"Top1=tick打板, Top2~5 entry_index>={min_score_buy}")
+        log.info(f"[generate_entry_signals] v14生成 {len(signals)} 个建仓信号: {type_counts}; "
+                 f"Top1=tick打板/混合严格试探, Top2~5 entry_index>={min_score_buy}")
     else:
-        log.info(f"[generate_entry_signals] v8无信号：候选不足或Top2~5均低于entry_index>={min_score_buy}")
+        log.info(f"[generate_entry_signals] v13无信号：候选不足或Top2~5均低于entry_index>={min_score_buy}")
 
     return signals
 
@@ -3997,6 +4245,117 @@ def _v11_recent_relay_stats(context) -> Dict:
     }
 
 
+
+def _v18_hot_breadth_snapshot(context) -> Dict:
+    """
+    v18：从10日热点记忆池读取情绪宽度。
+    这是盘前已知数据，不使用未来函数。
+    """
+    out = {
+        'core': 0,
+        'hot_continue': 0,
+        'trend': 0,
+        'top_hot': 0.0,
+        'top_entry': 0.0,
+        'temperature': 0.0,
+    }
+    try:
+        _v8_ensure_hot_memory()
+        items = list(getattr(g, 'hot_memory_pool', {}).values())
+        if not items:
+            return out
+        valid = []
+        for item in items:
+            try:
+                score = float(item.get('hot_score', 0) or 0)
+                entry = float(item.get('last_entry_index', 0) or 0)
+            except Exception:
+                score, entry = 0.0, 0.0
+            state = str(item.get('state', ''))
+            if score <= 0:
+                continue
+            valid.append((score, entry, state))
+            if state == 'CORE_LEADER':
+                out['core'] += 1
+            elif state == 'HOT_CONTINUE':
+                out['hot_continue'] += 1
+            elif state == 'TREND':
+                out['trend'] += 1
+        if not valid:
+            return out
+        valid.sort(key=lambda x: x[0], reverse=True)
+        top = valid[:10]
+        out['top_hot'] = float(np.mean([x[0] for x in top]))
+        out['top_entry'] = float(np.mean([x[1] for x in top]))
+        # 情绪温度：0~100。情绪宽度优先，指数只作为辅助过滤。
+        raw_count = int(getattr(g, 'zt_count_raw', 0) or 0)
+        temp = 0.0
+        temp += min(raw_count / 2.0, 35.0)              # rawZT=70 => 35分
+        temp += min(out['core'] * 4.0, 25.0)            # 龙头数量
+        temp += min(out['hot_continue'] * 2.0, 20.0)    # 续强扩散
+        temp += min(max(out['top_hot'] - 40.0, 0) / 3.0, 15.0)
+        temp += min(max(out['top_entry'] - 50.0, 0), 10.0)
+        out['temperature'] = float(min(temp, 100.0))
+    except Exception as e:
+        try:
+            log.info(f"[v18情绪宽度] 计算异常: {e}")
+        except Exception:
+            pass
+    return out
+
+
+def _v18_emotion_regime_override(raw_count: int, emotion: str, idx: Dict, relay: Dict, hb: Dict) -> Optional[str]:
+    """
+    v18：情绪优先覆盖器。
+    旧逻辑是“指数弱 => ICE”；v18 改为“指数弱 + 情绪强 => REBOUND_RELAY/MAIN_UPTREND”。
+    """
+    if not STRATEGY_CONFIG.get('v18_enable_emotion_first_regime', True):
+        return None
+
+    idx5 = float(idx.get('ret5', 0) or 0)
+    idx20 = float(idx.get('ret20', 0) or 0)
+    core = int(hb.get('core', 0) or 0)
+    hotc = int(hb.get('hot_continue', 0) or 0)
+    top_hot = float(hb.get('top_hot', 0) or 0)
+    top_entry = float(hb.get('top_entry', 0) or 0)
+    temp = float(hb.get('temperature', 0) or 0)
+
+    # 硬冰点：指数弱 + 情绪也弱，才允许 ICE。
+    hard_ice = (
+        raw_count < int(STRATEGY_CONFIG.get('v18_ice_rawzt_hard_min', 45) or 45)
+        and core <= int(STRATEGY_CONFIG.get('v18_ice_core_max', 1) or 1)
+        and top_hot <= float(STRATEGY_CONFIG.get('v18_ice_top_hot_max', 55) or 55)
+    )
+    if hard_ice:
+        return 'ICE'
+
+    # v19 主升：必须是情绪确认后的主线扩散，不再因为单日温度高就放开攻击。
+    main_ok = (
+        raw_count >= int(STRATEGY_CONFIG.get('v19_main_rawzt_min', 100) or 100)
+        and core >= int(STRATEGY_CONFIG.get('v19_main_core_min', 8) or 8)
+        and top_hot >= float(STRATEGY_CONFIG.get('v19_main_top_hot_min', 125) or 125)
+        and top_entry >= float(STRATEGY_CONFIG.get('v19_main_top_entry_min', 64) or 64)
+        and temp >= float(STRATEGY_CONFIG.get('v19_main_temperature_min', 85) or 85)
+    )
+    if main_ok:
+        return 'MAIN_UPTREND'
+
+    # v19 冰点修复：只在修复被确认后开启；过早修复日继续观望，避免v18高频噪音。
+    rebound_ok = (
+        raw_count >= int(STRATEGY_CONFIG.get('v19_rebound_rawzt_min', 85) or 85)
+        and core >= int(STRATEGY_CONFIG.get('v19_rebound_core_min', 5) or 5)
+        and hotc >= int(STRATEGY_CONFIG.get('v19_rebound_hot_continue_min', 5) or 5)
+        and top_hot >= float(STRATEGY_CONFIG.get('v19_rebound_top_hot_min', 105) or 105)
+        and top_entry >= float(STRATEGY_CONFIG.get('v19_rebound_top_entry_min', 61) or 61)
+        and idx5 >= float(STRATEGY_CONFIG.get('v19_rebound_idx5_min', -0.045) or -0.045)
+        and idx20 >= float(STRATEGY_CONFIG.get('v19_rebound_idx20_min', -0.09) or -0.09)
+        and temp >= float(STRATEGY_CONFIG.get('v19_rebound_temperature_min', 78) or 78)
+    )
+    if rebound_ok:
+        return 'REBOUND_RELAY'
+
+    return None
+
 def _update_market_regime_v11(context) -> None:
     """
     v11 市场风格状态机。
@@ -4011,18 +4370,55 @@ def _update_market_regime_v11(context) -> None:
     emotion = getattr(g, 'market_emotion_state', 'UNKNOWN')
     idx = _v11_safe_get_index_trend(context)
     relay = _v11_recent_relay_stats(context)
+    hb = _v18_hot_breadth_snapshot(context)
 
     idx_up = bool(idx.get('ok') and idx.get('ret20', 0) >= float(STRATEGY_CONFIG.get('v11_index_up_threshold', 0.015)))
     idx_down = bool(idx.get('ok') and idx.get('ret20', 0) <= float(STRATEGY_CONFIG.get('v11_index_down_threshold', -0.025)))
     relay_bad = bool(relay.get('ok') and relay.get('avg', 0) <= float(STRATEGY_CONFIG.get('v11_relay_recent_bad_avg_pnl', -0.006)))
     relay_good = bool(relay.get('ok') and relay.get('avg', 0) >= float(STRATEGY_CONFIG.get('v11_relay_recent_good_avg_pnl', 0.012)))
 
-    if emotion == 'WEAK' or idx_down:
+    # v15：后半段上涨修复。
+    # 当指数短线重新转强、昨日ZT仍不低、且不是指数大级别下跌时，
+    # 不再把市场完全判成 RELAY_WEAK/ICE；允许一个小仓位核心趋势低吸。
+    rebound_ok = bool(
+        STRATEGY_CONFIG.get('v15_enable_late_rebound', True)
+        and idx.get('ok')
+        and idx.get('ret5', 0) >= float(STRATEGY_CONFIG.get('v15_rebound_index_ret5_min', 0.012))
+        and idx.get('ret20', 0) >= float(STRATEGY_CONFIG.get('v15_rebound_index_ret20_min', -0.015))
+        and raw_count >= int(STRATEGY_CONFIG.get('v15_rebound_rawzt_min', 55) or 55)
+        and not idx_down
+        and emotion != 'WEAK'
+    )
+
+    # v13：保留v11“指数趋势市防守”的主框架，但增加受保护的 HYBRID_GUARDED。
+    # 只有当指数向上、昨日涨停数达到HOT阈值、且情绪为HOT时，才允许一个小仓位Top1试探；
+    # rawZT 100~129 仍按 TREND_INDEX 处理，避免v12那种把普通趋势市误判成接力市。
+    hybrid_raw = int(STRATEGY_CONFIG.get('v14_hybrid_rawzt_threshold', 130) or 130)
+    require_hot = bool(STRATEGY_CONFIG.get('v14_hybrid_require_emotion_hot', True))
+    hybrid_ok = bool(
+        STRATEGY_CONFIG.get('v13_enable_guarded_hybrid', True)
+        and idx_up
+        and raw_count >= hybrid_raw
+        and ((emotion == 'HOT') or (not require_hot))
+        and not relay_bad
+    )
+
+    # v18：先让情绪覆盖器判断。情绪足够强时，不能被指数弱直接压成ICE。
+    override_regime = _v18_emotion_regime_override(raw_count, emotion, idx, relay, hb)
+    if override_regime:
+        regime = override_regime
+    elif emotion == 'WEAK' or idx_down:
         regime = 'ICE'
+    elif hybrid_ok:
+        regime = 'HYBRID_GUARDED'
+    elif rebound_ok and relay_bad:
+        regime = 'TREND_REBOUND'
     elif idx_up and (relay_bad or raw_count < STRATEGY_CONFIG.get('emotion_hot_zt_threshold', 130)):
         regime = 'TREND_INDEX'
     elif relay_bad:
         regime = 'RELAY_WEAK'
+    elif rebound_ok and raw_count < STRATEGY_CONFIG.get('emotion_hot_zt_threshold', 130):
+        regime = 'TREND_REBOUND'
     elif emotion == 'HOT' or relay_good:
         regime = 'RELAY_HOT'
     else:
@@ -4033,6 +4429,8 @@ def _update_market_regime_v11(context) -> None:
     g.v11_index_ret20 = idx.get('ret20', 0.0)
     g.v11_recent_relay_avg = relay.get('avg', 0.0)
     g.v11_recent_relay_win_rate = relay.get('win_rate', 0.5)
+    g.v18_hot_breadth = hb
+    g.v18_emotion_temperature = float(hb.get('temperature', 0) or 0)
     g.disable_top1_tick_today = False
 
     if regime == 'ICE':
@@ -4041,13 +4439,42 @@ def _update_market_regime_v11(context) -> None:
         g.dynamic_score_buy_min_entry_index = 999
         g.dynamic_score_buy_min_return = 999
         g.disable_top1_tick_today = True
+    elif regime == 'MAIN_UPTREND':
+        # v19：主升确认后才允许Top1，且只保留一个核心低吸名额。
+        g.disable_top1_tick_today = False
+        g.allow_new_entries_today = True
+        g.max_score_buys_today = int(STRATEGY_CONFIG.get('v19_main_max_score_buys', 1) or 1)
+        g.dynamic_score_buy_min_entry_index = max(float(getattr(g, 'dynamic_score_buy_min_entry_index', 50) or 50), float(STRATEGY_CONFIG.get('v19_rebound_min_entry_index', 63) or 63))
+        g.dynamic_score_buy_min_return = min(float(getattr(g, 'dynamic_score_buy_min_return', 0.006) or 0.006), float(STRATEGY_CONFIG.get('v19_rebound_min_0931_ret', -0.018) or -0.018))
+    elif regime == 'REBOUND_RELAY':
+        # v19：冰点修复只低吸，不打板；避免v18在修复初期追高被反复洗。
+        g.disable_top1_tick_today = bool(STRATEGY_CONFIG.get('v19_rebound_disable_top1', True))
+        g.allow_new_entries_today = True
+        g.max_score_buys_today = int(STRATEGY_CONFIG.get('v19_rebound_max_score_buys', 1) or 1)
+        g.dynamic_score_buy_min_entry_index = max(float(getattr(g, 'dynamic_score_buy_min_entry_index', 50) or 50), float(STRATEGY_CONFIG.get('v19_rebound_min_entry_index', 63) or 63))
+        g.dynamic_score_buy_min_return = min(float(getattr(g, 'dynamic_score_buy_min_return', 0.006) or 0.006), float(STRATEGY_CONFIG.get('v19_rebound_min_0931_ret', -0.018) or -0.018))
     elif regime == 'TREND_INDEX':
         # 指数趋势市：禁打板，少量做强趋势低吸；防止“基准涨、策略跌”。
         if STRATEGY_CONFIG.get('v11_trend_disable_top1_tick', True):
             g.disable_top1_tick_today = True
         g.max_score_buys_today = min(int(getattr(g, 'max_score_buys_today', 1) or 1), int(STRATEGY_CONFIG.get('v11_trend_max_score_buys', 1) or 1))
         g.dynamic_score_buy_min_entry_index = max(float(getattr(g, 'dynamic_score_buy_min_entry_index', 50) or 50), float(STRATEGY_CONFIG.get('v11_trend_min_entry_index', 60) or 60))
-        g.dynamic_score_buy_min_return = min(float(getattr(g, 'dynamic_score_buy_min_return', 0.006) or 0.006), 0.006)
+        g.dynamic_score_buy_min_return = min(float(getattr(g, 'dynamic_score_buy_min_return', 0.006) or 0.006), float(STRATEGY_CONFIG.get('v14_trend_min_0931_ret', -0.006) or -0.006))
+        g.allow_new_entries_today = True
+    elif regime == 'HYBRID_GUARDED':
+        # 指数趋势 + 短线极热共振：允许一个Top1试探，同时保留最多一个SCORE_BUY低吸。
+        # 仓位降低，避免v12多tick打板放大噪音。
+        g.disable_top1_tick_today = False
+        g.max_score_buys_today = min(int(getattr(g, 'max_score_buys_today', 1) or 1), int(STRATEGY_CONFIG.get('v14_hybrid_max_score_buys', 1) or 1))
+        g.dynamic_score_buy_min_entry_index = max(float(getattr(g, 'dynamic_score_buy_min_entry_index', 50) or 50), 55.0)
+        g.dynamic_score_buy_min_return = min(float(getattr(g, 'dynamic_score_buy_min_return', 0.008) or 0.008), float(STRATEGY_CONFIG.get('v14_trend_min_0931_ret', -0.006) or -0.006))
+        g.allow_new_entries_today = True
+    elif regime == 'TREND_REBOUND':
+        # v15：上涨后半段/修复段。禁打板，只允许一个高质量核心趋势低吸，防止继续空仓。
+        g.disable_top1_tick_today = True
+        g.max_score_buys_today = min(int(getattr(g, 'max_score_buys_today', 1) or 1), int(STRATEGY_CONFIG.get('v15_rebound_max_score_buys', 1) or 1))
+        g.dynamic_score_buy_min_entry_index = max(float(getattr(g, 'dynamic_score_buy_min_entry_index', 50) or 50), float(STRATEGY_CONFIG.get('v15_rebound_min_entry_index', 52) or 52))
+        g.dynamic_score_buy_min_return = min(float(getattr(g, 'dynamic_score_buy_min_return', 0.006) or 0.006), float(STRATEGY_CONFIG.get('v15_rebound_min_0931_ret', -0.004) or -0.004))
         g.allow_new_entries_today = True
     elif regime == 'RELAY_WEAK':
         if STRATEGY_CONFIG.get('v11_relay_weak_no_new_buy', True):
@@ -4060,6 +4487,7 @@ def _update_market_regime_v11(context) -> None:
         f"[v11市场状态] regime={regime} | emotion={emotion} | rawZT={raw_count} | "
         f"idx5={idx.get('ret5', 0):.2%} idx20={idx.get('ret20', 0):.2%} | "
         f"recentRelay n={relay.get('n',0)} avg={relay.get('avg',0):.2%} win={relay.get('win_rate',0.5):.1%} | "
+        f"hotCore={hb.get('core',0)} hotCont={hb.get('hot_continue',0)} topHot={hb.get('top_hot',0):.1f} topEntry={hb.get('top_entry',0):.1f} temp={hb.get('temperature',0):.1f} | "
         f"disableTop1={getattr(g,'disable_top1_tick_today',False)} maxScoreBuy={getattr(g,'max_score_buys_today',0)}"
     )
 
@@ -4217,7 +4645,7 @@ def initialize(context):
         except Exception as e:
             log.info(f"[initialize] 注册risk_management_v62({_t})失败: {e}")
 
-    log.info("[initialize] 涨停板交易策略 v11 初始化完成")
+    log.info("[initialize] 涨停板交易策略 v19 初始化完成")
     log.info(f"[initialize] 最大持仓: {STRATEGY_CONFIG['max_holdings']}, "
              f"每日最大建仓: {STRATEGY_CONFIG['max_entry_count']}, "
              f"ZT阈值: {STRATEGY_CONFIG['zt_count_threshold']}")
@@ -4725,7 +5153,19 @@ def _score_buy_quality_ok(context, code: str, sig: Dict, price: float, open_pric
         open_strength = price / open_price - 1.0
         min_open_strength = float(STRATEGY_CONFIG.get('score_buy_min_open_strength', 0.0015) or 0)
 
-        # v8：允许低开后转强
+        # v14：强热点核心股允许小幅低开/开盘后回落低吸。
+        # v13 日志显示，多只CORE_LEADER因 open_strength -0.1%~-0.5% 被过滤，错过后续主升。
+        hot_state = str(sig.get('v8_hot_state', '') or '')
+        hot_score = float(sig.get('v8_hot_score', 0) or 0)
+        is_core_absorb = (
+            hot_state in ('CORE_LEADER', 'HOT_CONTINUE')
+            and entry_index >= float(STRATEGY_CONFIG.get('v11_trend_min_entry_index', 58) or 58)
+            and (total_score >= float(STRATEGY_CONFIG.get('v11_trend_min_total_score', 52) or 52) or hot_score >= 150)
+        )
+        if is_core_absorb:
+            min_open_strength = min(min_open_strength, float(STRATEGY_CONFIG.get('v14_core_min_open_strength', -0.006) or -0.006))
+
+        # v8/v14：普通候选要求不弱于开盘；核心趋势股允许小幅低吸。
         if open_strength < min_open_strength:
             return False, f"低开过弱 open_strength={open_strength:.2%} < {min_open_strength:.2%}" 
 
@@ -4845,6 +5285,12 @@ def buy_score_candidates(context):
             max_ret_allowed = STRATEGY_CONFIG.get('score_buy_max_return', 0.07)
             if getattr(g, 'v11_market_regime', '') == 'TREND_INDEX':
                 max_ret_allowed = min(float(max_ret_allowed or 0.07), float(STRATEGY_CONFIG.get('v11_trend_max_0931_ret', 0.045) or 0.045))
+            elif getattr(g, 'v11_market_regime', '') == 'TREND_REBOUND':
+                max_ret_allowed = min(float(max_ret_allowed or 0.07), float(STRATEGY_CONFIG.get('v15_rebound_max_0931_ret', 0.055) or 0.055))
+            elif getattr(g, 'v11_market_regime', '') == 'REBOUND_RELAY':
+                max_ret_allowed = min(float(max_ret_allowed or 0.07), float(STRATEGY_CONFIG.get('v19_rebound_max_0931_ret', 0.035) or 0.035))
+            elif getattr(g, 'v11_market_regime', '') == 'MAIN_UPTREND':
+                max_ret_allowed = min(float(max_ret_allowed or 0.07), float(STRATEGY_CONFIG.get('v18_rebound_max_0931_ret', 0.065) or 0.065))
             if ret > max_ret_allowed:
                 log.info(f"[SCORE_BUY_0931跳过] {code} 涨幅过高，避免追高 ret={ret:.2%} > {max_ret_allowed:.2%}")
                 continue
@@ -4855,6 +5301,12 @@ def buy_score_candidates(context):
             pos_ratio = STRATEGY_CONFIG.get('score_buy_position_ratio', 0.75)
             if getattr(g, 'v11_market_regime', '') == 'TREND_INDEX':
                 pos_ratio = STRATEGY_CONFIG.get('v11_trend_score_buy_position_ratio', 0.38)
+            elif getattr(g, 'v11_market_regime', '') == 'TREND_REBOUND':
+                pos_ratio = STRATEGY_CONFIG.get('v15_rebound_score_buy_position_ratio', 0.58)
+            elif getattr(g, 'v11_market_regime', '') == 'REBOUND_RELAY':
+                pos_ratio = STRATEGY_CONFIG.get('v19_rebound_score_buy_position_ratio', 0.55)
+            elif getattr(g, 'v11_market_regime', '') == 'MAIN_UPTREND':
+                pos_ratio = STRATEGY_CONFIG.get('v19_main_score_buy_position_ratio', 0.58)
             shares = calc_position_size(context, code, ratio=pos_ratio)
             if shares <= 0:
                 log.info(f"[SCORE_BUY_0931跳过] {code} 仓位不足，shares=0")
@@ -4947,7 +5399,14 @@ def handle_tick(context, tick):
             return
 
         if current_price >= high_limit * trigger_ratio:
-            shares = calc_position_size(context, code, ratio=STRATEGY_CONFIG.get('top1_position_ratio', 1.5))
+            
+            pos_ratio = STRATEGY_CONFIG.get('top1_position_ratio', 1.5)
+            try:
+                if signal.get('v14_guarded_hybrid'):
+                    pos_ratio = STRATEGY_CONFIG.get('v14_hybrid_top1_position_ratio', 0.60)
+            except Exception:
+                pass
+            shares = calc_position_size(context, code, ratio=pos_ratio)
             if shares <= 0:
                 return
             order_result = _submit_limit_buy(code, shares, high_limit)
@@ -5044,9 +5503,11 @@ def _v10_runner_profile(code: str, holding: Dict) -> Dict:
     is_core_state = hot_state in ('CORE_LEADER', 'HOT_CONTINUE')
     is_top1 = entry_type == 'TOP1_TICK'
     is_hot_memory = hot_score >= float(STRATEGY_CONFIG.get('runner_hot_score_min', 120) or 120)
-    is_strong_entry = (entry_index >= float(STRATEGY_CONFIG.get('runner_entry_index_min', 62) or 62)
+    is_strong_entry = (is_core_state
+                       and entry_index >= float(STRATEGY_CONFIG.get('runner_entry_index_min', 62) or 62)
                        and total_score >= float(STRATEGY_CONFIG.get('runner_total_score_min', 45) or 45))
-    is_repeated_seen = seen_count >= 4 and hot_state in ('CORE_LEADER', 'HOT_CONTINUE', 'TREND')
+    # v20：TREND不再仅因反复出现就自动runner，避免普通趋势票持有过久拖累收益。
+    is_repeated_seen = seen_count >= 4 and hot_state in ('CORE_LEADER', 'HOT_CONTINUE')
 
     is_runner = bool(is_top1 or is_core_state or is_hot_memory or is_strong_entry or is_repeated_seen)
     return {
@@ -5073,11 +5534,115 @@ def _v10_mark_holding_runner(code: str) -> None:
     except Exception as e:
         log.info(f"[v10利润奔跑标记异常] {code}: {e}")
 
+
+def _v16_hot_rank(code: str) -> int:
+    """返回当前热点记忆池排名；不存在则给大数。"""
+    try:
+        pool = getattr(g, 'hot_memory_pool', {}) or {}
+        if not pool or code not in pool:
+            return 999
+        items = sorted(pool.items(), key=lambda kv: float(kv[1].get('hot_score', 0) or 0), reverse=True)
+        for i, (c, _) in enumerate(items, 1):
+            if c == code:
+                return i
+    except Exception:
+        pass
+    return 999
+
+
+def _v16_update_runner_decay_state(code: str, holding: Dict, profile: Dict, today) -> Dict:
+    """
+    v16：跟踪龙头衰退，不使用未来函数。
+    每个交易日只更新一次：hot_score下降、热点状态降级、热点排名掉队。
+    """
+    info = {
+        'rank': _v16_hot_rank(code),
+        'decay_days': int(holding.get('v16_hot_decay_days', 0) or 0),
+        'is_decaying': False,
+        'rank_warning': False,
+        'rank_exit': False,
+        'reason': ''
+    }
+    if not STRATEGY_CONFIG.get('v16_enable_runner_decay_exit', True):
+        return info
+    try:
+        today_key = str(today)
+        last_update = str(holding.get('v16_last_decay_update', '') or '')
+        cur_hot = float(profile.get('hot_score', 0) or 0)
+        last_hot = float(holding.get('v16_last_hot_score', cur_hot) or cur_hot)
+        cur_state = str(profile.get('hot_state', '') or '')
+        last_state = str(holding.get('v16_last_hot_state', cur_state) or cur_state)
+        rank = int(info['rank'])
+        warn_rank = int(STRATEGY_CONFIG.get('v16_runner_rank_warn_threshold', 5) or 5)
+        exit_rank = int(STRATEGY_CONFIG.get('v16_runner_rank_exit_threshold', 8) or 8)
+        decay_pct = float(STRATEGY_CONFIG.get('v16_hot_score_decay_pct', 0.12) or 0.12)
+        state_order = {'CORE_LEADER': 4, 'HOT_CONTINUE': 3, 'TREND': 2, 'WEAKENING': 1, 'DEAD': 0, '': 0}
+        state_down = state_order.get(cur_state, 0) < state_order.get(last_state, 0)
+        hot_down = (last_hot > 0 and cur_hot < last_hot * (1.0 - decay_pct))
+        rank_bad = rank > exit_rank
+        rank_warn = rank > warn_rank
+        info['rank_warning'] = bool(rank_warn)
+        info['rank_exit'] = bool(rank_bad)
+        if last_update != today_key:
+            if hot_down or state_down or rank_bad:
+                info['decay_days'] = int(info['decay_days']) + 1
+                holding['v16_hot_decay_days'] = info['decay_days']
+                reasons = []
+                if hot_down:
+                    reasons.append(f"hot {last_hot:.1f}->{cur_hot:.1f}")
+                if state_down:
+                    reasons.append(f"state {last_state}->{cur_state}")
+                if rank_bad:
+                    reasons.append(f"rank {rank}")
+                info['reason'] = ', '.join(reasons)
+                log.info(f"[v16龙头衰退计数] {code} decay_days={info['decay_days']} | {info['reason']}")
+            else:
+                # 回到Top队列或hot恢复，衰退计数缓慢清零，避免一次噪音误杀。
+                if int(info['decay_days']) > 0 and (cur_state in ('CORE_LEADER','HOT_CONTINUE')) and rank <= warn_rank:
+                    info['decay_days'] = max(0, int(info['decay_days']) - 1)
+                    holding['v16_hot_decay_days'] = info['decay_days']
+            holding['v16_last_hot_score'] = cur_hot
+            holding['v16_last_hot_state'] = cur_state
+            holding['v16_last_hot_rank'] = rank
+            holding['v16_last_decay_update'] = today_key
+        info['is_decaying'] = int(info['decay_days']) >= int(STRATEGY_CONFIG.get('v16_hot_decay_days_to_exit', 2) or 2)
+    except Exception as e:
+        try:
+            log.info(f"[v16龙头衰退检测异常] {code}: {e}")
+        except Exception:
+            pass
+    return info
+
+
+def _v16_runner_dynamic_dd(max_profit_pct: float, decay_info: Dict) -> float:
+    """根据曾经浮盈和热点衰退状态，动态收紧runner回撤阈值。"""
+    if not STRATEGY_CONFIG.get('v16_dynamic_trail_enabled', True):
+        return float(STRATEGY_CONFIG.get('runner_profit_drawdown_pct', 0.08) or 0.08)
+    if max_profit_pct >= 0.12:
+        dd = float(STRATEGY_CONFIG.get('v16_runner_dd_after_12pct', 0.050) or 0.050)
+    elif max_profit_pct >= 0.08:
+        dd = float(STRATEGY_CONFIG.get('v16_runner_dd_after_8pct', 0.035) or 0.035)
+    elif max_profit_pct >= 0.05:
+        dd = float(STRATEGY_CONFIG.get('v16_runner_dd_after_5pct', 0.024) or 0.024)
+    elif max_profit_pct >= 0.03:
+        dd = float(STRATEGY_CONFIG.get('v16_runner_dd_after_3pct', 0.018) or 0.018)
+    else:
+        dd = float(STRATEGY_CONFIG.get('runner_profit_drawdown_pct', 0.08) or 0.08)
+    # 跌出Top5但尚未彻底衰退，进一步收紧，保护利润。
+    try:
+        if decay_info.get('rank_warning'):
+            dd = min(dd, 0.026)
+        if decay_info.get('is_decaying'):
+            dd = min(dd, 0.020)
+    except Exception:
+        pass
+    return dd
+
 def risk_management_v62(context):
     """
-    v10 固定时间风控入口。
-    核心变化：普通票继续严格保护；TOP1/CORE_LEADER/HOT_CONTINUE/高hot_score票进入“利润奔跑”模式，
-    允许更大的盘中回撤和更长持仓周期，避免把真正龙头在T+1洗盘中卖飞。
+    v16 固定时间风控入口。
+    在v15跟上后半段行情的基础上，增加龙头衰退识别和动态利润保护，
+    目标是减少利润回吐，把最大回撤压回更健康区间。
     """
     if not hasattr(g, 'holdings'):
         return
@@ -5130,6 +5695,7 @@ def risk_management_v62(context):
         is_runner = bool(profile.get('is_runner'))
         h['v10_runner'] = is_runner
         h['v10_runner_profile'] = profile
+        decay_info = _v16_update_runner_decay_state(code, h, profile, today) if is_runner else {'rank': 999, 'is_decaying': False, 'rank_warning': False}
 
         # 1. 止损：runner允许正常波动，但不能无底线扛错。
         try:
@@ -5153,6 +5719,20 @@ def risk_management_v62(context):
         if pnl_pct <= -hard_stop:
             _sell_position(context, code, reason=f"v10硬止损({'RUNNER' if is_runner else 'NORMAL'} {pnl_pct:.2%})")
             continue
+
+        # v16：龙头衰退退出。只在已有利润/曾有明显浮盈后触发，避免把正常低位波动当衰退。
+        if is_runner and STRATEGY_CONFIG.get('v16_enable_runner_decay_exit', True):
+            try:
+                max_profit_for_decay = (highest - buy_price) / buy_price if highest > buy_price else 0
+                min_hold_decay = int(STRATEGY_CONFIG.get('v16_runner_min_hold_for_decay_exit', 2) or 2)
+                min_pnl_decay = float(STRATEGY_CONFIG.get('v16_decay_exit_min_profit', 0.018) or 0.018)
+                min_max_decay = float(STRATEGY_CONFIG.get('v16_decay_exit_min_max_profit', 0.035) or 0.035)
+                if (hold_days >= min_hold_decay and decay_info.get('is_decaying')
+                        and pnl_pct >= min_pnl_decay and max_profit_for_decay >= min_max_decay):
+                    _sell_position(context, code, reason=f"v16龙头衰退止盈(rank={decay_info.get('rank')}, decay_days={decay_info.get('decay_days')}, pnl={pnl_pct:.2%}, max={max_profit_for_decay:.2%})")
+                    continue
+            except Exception:
+                pass
 
         # 2. 高利润开板：普通票可止盈；runner在最小持有期内优先拿住。
         if pnl_pct >= STRATEGY_CONFIG.get('t1_profit_take_pct', 0.09):
@@ -5178,9 +5758,10 @@ def risk_management_v62(context):
             dd_from_high = (highest - price) / highest if highest > 0 else 0
 
             if is_runner:
-                protect_min = float(STRATEGY_CONFIG.get('runner_profit_protect_min_pct', 0.12) or 0.12)
-                protect_dd = float(STRATEGY_CONFIG.get('runner_profit_drawdown_pct', 0.08) or 0.08)
-                trailing_dd = float(STRATEGY_CONFIG.get('runner_trailing_stop_pct', 0.10) or 0.10)
+                # v16：runner不再一律给8%大回撤，而是按已获得浮盈动态收紧。
+                protect_min = min(float(STRATEGY_CONFIG.get('runner_profit_protect_min_pct', 0.12) or 0.12), 0.03)
+                protect_dd = _v16_runner_dynamic_dd(max_profit_pct, decay_info)
+                trailing_dd = max(protect_dd + 0.012, float(STRATEGY_CONFIG.get('runner_trailing_stop_pct', 0.10) or 0.10) * 0.55)
                 be_after = float(STRATEGY_CONFIG.get('runner_break_even_after_profit_pct', 0.10) or 0.10)
                 be_buffer = float(STRATEGY_CONFIG.get('runner_break_even_buffer_pct', -0.015) or -0.015)
             else:

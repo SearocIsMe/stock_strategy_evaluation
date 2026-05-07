@@ -44,7 +44,7 @@ except ImportError:
 # PART 0: 配置常量
 # ============================================================
 
-LOOKBACK_DAYS = 45          # 回溯交易日数
+LOOKBACK_DAYS = 15          # 回溯交易日数
 TRACK_DAYS = 5              # T+N 追踪天数 (N=1~5)
 HISTORY_DAYS = 120          # 因子计算所需历史天数（MA60等需要足够前置数据）
 BATCH_SIZE = 300            # API批量查询大小
@@ -2269,7 +2269,14 @@ class StockScorer:
         factor_df = factor_df.copy()
 
         # 每只股票取最新日期的因子记录
-        latest_idx = factor_df.groupby('code')['date'].idxmax()
+        # ★ v1.3修复: date列可能为字符串类型，idxmax()在pandas groupby中对字符串列会报TypeError
+        #   解决方案: 先转为datetime再取idxmax
+        if factor_df['date'].dtype == object or str(factor_df['date'].dtype) == 'string':
+            factor_df['_date_dt'] = pd.to_datetime(factor_df['date'], errors='coerce')
+            latest_idx = factor_df.groupby('code')['_date_dt'].idxmax()
+            factor_df = factor_df.drop(columns=['_date_dt'])
+        else:
+            latest_idx = factor_df.groupby('code')['date'].idxmax()
         latest_factors = factor_df.loc[latest_idx].copy()
 
         # 标记活跃池股票 (最近5天内涨停且未过期)
@@ -2309,8 +2316,14 @@ class StockScorer:
             print("  [跳过评分] 无有效因子z-score数据")
             return pd.DataFrame()
 
-        score_arr = sum(score_components)
-        contributing_arr = sum(valid_counts)
+        # ★ v1.3修复: Python内置sum()从0开始累加，0+Series在旧版pandas可能返回标量
+        #   改用显式Series累加，避免类型坍缩
+        score_arr = score_components[0]
+        for sc in score_components[1:]:
+            score_arr = score_arr.add(sc, fill_value=0)
+        contributing_arr = valid_counts[0]
+        for vc in valid_counts[1:]:
+            contributing_arr = contributing_arr.add(vc, fill_value=0)
         # 归一化: 除以贡献因子数的平方根，避免因子多的股票得分偏高
         score_arr = score_arr / np.maximum(contributing_arr ** 0.5, 1.0)
 
@@ -2328,10 +2341,25 @@ class StockScorer:
         result['raw_score'] = score_arr.values
         result['contributing_factors'] = contributing_arr.astype(int).values
 
+        # ★ v1.3: 添加中文股票名称列
+        try:
+            code_name_map = {}
+            for code in result['code'].unique():
+                try:
+                    info = get_security_info(code)
+                    code_name_map[code] = info.display_name if info else ''
+                except Exception:
+                    code_name_map[code] = ''
+            result['stock_name'] = result['code'].map(code_name_map).fillna('')
+        except Exception:
+            result['stock_name'] = ''
+
         # 标准化得分到 [0, 100]
+        # ★ v1.3优化: 改用百分位排名评分，避免大量股票聚集在100分
+        #   旧方法: z-score标准化+clip → 多只股票超出3σ被截断为100
+        #   新方法: rank(pct=True)*100 → 均匀分布在[0,100]，无聚集
         if result['raw_score'].std() > 1e-10:
-            result['score'] = 50 + 50 * (result['raw_score'] - result['raw_score'].mean()) / result['raw_score'].std()
-            result['score'] = result['score'].clip(0, 100)
+            result['score'] = result['raw_score'].rank(pct=True) * 100
         else:
             result['score'] = 50.0
 
@@ -2456,11 +2484,15 @@ class StockScorer:
         """获取分类汇总统计"""
         if self.scores_df.empty:
             return pd.DataFrame()
-        return self.scores_df.groupby('classification').agg(
-            count=('code', 'count'),
-            avg_score=('score', 'mean'),
-            avg_close=('close', 'mean'),
-        ).round(2)
+        # ★ v1.3修复: 命名聚合语法agg(count=...)需要pandas>=0.25，旧版不支持
+        #   改用字典聚合+重命名列
+        summary = self.scores_df.groupby('classification').agg({
+            'code': 'count',
+            'score': 'mean',
+            'close': 'mean'
+        })
+        summary.columns = ['count', 'avg_score', 'avg_close']
+        return summary.round(2)
 
     def print_report(self, top_n=5):
         """打印评分报告"""
@@ -2499,7 +2531,7 @@ class StockScorer:
         # ── Top N 强势股 ──
         top = self.get_top_n(top_n)
         if not top.empty:
-            display_cols = ['code', 'score', 'classification', 'close', 'buy_price', 'stop_loss', 'target_price', 'contributing_factors']
+            display_cols = ['code', 'stock_name', 'date', 'score', 'classification', 'close', 'buy_price', 'stop_loss', 'target_price', 'contributing_factors']
             avail_cols = [c for c in display_cols if c in top.columns]
             print(f"\n  ★ Top {top_n} 强势股 (下个交易日推荐关注):")
             _display(top[avail_cols].round(2))
@@ -2508,6 +2540,8 @@ class StockScorer:
             print(f"\n  交易信号详情:")
             for _, row in top.iterrows():
                 code = row['code']
+                stock_name = row.get('stock_name', '')
+                name_label = f"{stock_name}" if stock_name else code
                 score_val = row.get('score', 0)
                 cls = row.get('classification', '')
                 buy = row.get('buy_price', np.nan)
@@ -2518,13 +2552,16 @@ class StockScorer:
                     risk_pct = (buy - sl) / buy * 100 if buy > 0 else 0
                     reward_pct = (tgt - buy) / buy * 100 if buy > 0 else 0
                     rr_ratio = reward_pct / risk_pct if risk_pct > 0 else 0
-                    print(f"    {code}: 得分={score_val:.1f} [{cls}]")
+                    print(f"    {name_label}({code}): 得分={score_val:.1f} [{cls}]")
                     print(f"      买入={buy:.2f}  止损={sl:.2f}(-{risk_pct:.1f}%)  目标={tgt:.2f}(+{reward_pct:.1f}%)  盈亏比={rr_ratio:.1f}:1")
 
-                # Top 3 因子贡献
+                # Top 3 因子贡献 (含中文名)
                 contribs = self.get_top_factor_contributors(code, top_n=3)
                 if contribs:
-                    contrib_str = " | ".join(f"{f}({c:+.3f})" for f, c, z, w in contribs)
+                    contrib_str = " | ".join(
+                        f"{f}({FACTOR_NAME_CN.get(f, '')})({c:+.3f})" if FACTOR_NAME_CN.get(f, '') else f"{f}({c:+.3f})"
+                        for f, c, z, w in contribs
+                    )
                     print(f"      关键因子: {contrib_str}")
 
         # ── 全部分类列表 ──
@@ -2534,19 +2571,19 @@ class StockScorer:
 
         if not strong.empty:
             print(f"\n  强势股列表 ({len(strong)}只):")
-            cols = ['code', 'score', 'close', 'buy_price', 'stop_loss', 'target_price']
+            cols = ['code', 'stock_name', 'date', 'score', 'close', 'buy_price', 'stop_loss', 'target_price']
             avail = [c for c in cols if c in strong.columns]
             _display(strong[avail].round(2))
 
         if not weak.empty:
             print(f"\n  弱势股列表 ({len(weak)}只):")
-            cols = ['code', 'score', 'close']
+            cols = ['code', 'stock_name', 'date', 'score', 'close']
             avail = [c for c in cols if c in weak.columns]
             _display(weak[avail].round(2))
 
         if not eliminated.empty:
             print(f"\n  淘汰股列表 ({len(eliminated)}只):")
-            cols = ['code', 'score', 'close']
+            cols = ['code', 'stock_name', 'date', 'score', 'close']
             avail = [c for c in cols if c in eliminated.columns]
             _display(eliminated[avail].round(2))
 
@@ -2622,14 +2659,14 @@ def print_final_reports(factor_df, ic_monitor, collinearity_det, tn_tracker,
     print_section_header('PART E: 因子-收益分桶相关性矩阵')
     if not bucket_corr_df.empty:
         print("  因子与T+5收益分桶的Spearman相关系数:")
-        _display(bucket_corr_df.round(4).head(30))
-        # 中英文因子名称映射表
-        factors_in_matrix = bucket_corr_df.index.tolist()
-        mapped = [(f, FACTOR_NAME_CN.get(f, '')) for f in factors_in_matrix if FACTOR_NAME_CN.get(f, '')]
-        if mapped:
-            print(f"\n  因子中英文名称映射:")
-            for en, cn in mapped:
-                print(f"    {en:30s} → {cn}")
+        # ★ v1.3: 将因子英文名替换为"英文名(中文名)"格式，直接在表格中显示
+        display_df = bucket_corr_df.round(4).head(30).copy()
+        new_index = []
+        for f in display_df.index:
+            cn = FACTOR_NAME_CN.get(f, '')
+            new_index.append(f"{f}({cn})" if cn else f)
+        display_df.index = new_index
+        _display(display_df)
     else:
         print("  无分桶相关性数据")
 
