@@ -49,8 +49,8 @@ CONFIG = {
         'avg_price_increase_min': 0.07,     # 均价增长最低要求（相对收盘价×1.1）
         'money_min': 5.5e8,                 # 最低成交金额
         'money_max': 20e8,                  # 最高成交金额
-        'market_cap_min': 75,               # 最低总市值（亿）
-        'circulating_market_cap_max': 520,  # 最高流通市值（亿）
+        'market_cap_min': 5,               # 最低总市值（亿）
+        'circulating_market_cap_max': 100,  # 最高流通市值（亿）
         'auction_vol_ratio_min': 0.03,      # 集合竞价成交量/昨日成交量 最低比例
         'current_ratio_min': 1.0,           # 开盘价/昨日涨停价 下限
         'current_ratio_max': 1.06,          # 开盘价/昨日涨停价 上限
@@ -73,8 +73,8 @@ CONFIG = {
         'avg_price_increase_min': -0.04,    # 均价增长最低要求
         'money_min': 3e8,                   # 最低成交金额
         'money_max': 19e8,                  # 最高成交金额
-        'market_cap_min': 75,               # 最低总市值（亿）
-        'circulating_market_cap_max': 520,  # 最高流通市值（亿）
+        'market_cap_min': 300,               # 最低总市值（亿）
+        'circulating_market_cap_max': 30000,  # 最高流通市值（亿）
         'auction_vol_ratio_min': 0.03,      # 集合竞价成交量/昨日成交量 最低比例
         'current_ratio_min': 0.98,          # 开盘价/昨日涨停价 下限
         'current_ratio_max': 1.09,          # 开盘价/昨日涨停价 上限
@@ -106,7 +106,7 @@ CONFIG = {
 
     # ------ 风险控制参数 ------
     'risk_control': {
-        'enabled': True,  # 风险控制总开关（False时所有风控措施均不生效）
+        'enabled': False,  # 风险控制总开关（False时所有风控措施均不生效）
 
         # ====== 核心风控（对回撤影响最大）======
 
