@@ -17,6 +17,7 @@ from jqfactor import *       # 聚宽因子模块，提供因子计算功能
 from jqlib.technical_analysis import *  # 聚宽技术分析模块
 import datetime as dt        # 日期时间处理
 import pandas as pd          # 数据处理和分析
+import numpy as np           # 数值计算（KDJ/MACD指标计算）
 from datetime import datetime
 from datetime import timedelta
 
@@ -37,7 +38,9 @@ CONFIG = {
     # ------ 定时任务时间 ------
     'schedule': {
         'get_stock_list': '9:10',         # 获取选股列表
-        'buy': '09:30',                   # 执行买入操作（集合竞价结束后）
+        'buy': '09:30',                   # 执行一进二买入（集合竞价结束后）
+        # buy_gap_down: 见 gap_down_buy.check_times (09:35-09:55 每5分钟)
+        # buy_reversal: 见 reversal_buy.check_times (09:45-14:30 每15分钟)
         'sell_heavy_turnover': '10:00',   # 高位放量卖出
         'sell_am': '11:25',              # 上午收盘前止盈
         'sell_pm': '13:15',              # 下午收盘前止盈/止损
@@ -78,6 +81,29 @@ CONFIG = {
         'auction_vol_ratio_min': 0.03,      # 集合竞价成交量/昨日成交量 最低比例
         'current_ratio_min': 0.98,          # 开盘价/昨日涨停价 下限
         'current_ratio_max': 1.09,          # 开盘价/昨日涨停价 上限
+    },
+
+    # ------ 首板低开分时买入参数 (gap_down_buy) ------
+    'gap_down_buy': {
+        'check_times': ['09:35', '09:40', '09:45', '09:50', '09:55'],  # 买入检查时间点
+        'min_bars': 5,                      # 最少1分钟K线数量（用于2波检测）
+        'wave2_min_ratio': 0.995,           # 波2低点/波1低点 最小比率（波2不低于波1的0.5%）
+        'wave2_max_ratio': 1.005,           # 波2低点/波1低点 最大比率（波2不超过波1的0.5%）
+    },
+
+    # ------ 弱转强分时买入参数 (reversal_buy) ------
+    'reversal_buy': {
+        'check_times': ['09:45', '10:00', '10:15', '10:30', '10:45', '11:00', '11:15',
+                        '13:00', '13:15', '13:30', '13:45', '14:00', '14:15', '14:30'],
+        'kdj_period': 9,                    # KDJ RSV周期
+        'kdj_smooth_k': 3,                  # KDJ K平滑周期
+        'kdj_smooth_d': 3,                  # KDJ D平滑周期
+        'macd_fast': 12,                    # MACD快线周期
+        'macd_slow': 26,                    # MACD慢线周期
+        'macd_signal': 9,                   # MACD信号线周期
+        'require_kdj_cross': True,          # 是否要求KDJ金叉
+        'require_macd_cross': True,         # 是否要求MACD金叉
+        'min_15m_bars': 35,                 # 最少15分钟K线数量（MACD需要26+9）
     },
 
     # ------ 左压检测参数 (rise_low_volume) ------
@@ -178,6 +204,12 @@ def initialize(context):
     # 设置定时任务（时间从CONFIG读取）
     run_daily(get_stock_list, CONFIG['schedule']['get_stock_list'])
     run_daily(buy, CONFIG['schedule']['buy'])
+    # 首板低开分时买入（多个时间点）
+    for t in CONFIG['gap_down_buy']['check_times']:
+        run_daily(buy_gap_down, time=t)
+    # 弱转强分时买入（多个时间点）
+    for t in CONFIG['reversal_buy']['check_times']:
+        run_daily(buy_reversal, time=t)
     run_daily(sell_heavy_turnover, time=CONFIG['schedule']['sell_heavy_turnover'])
     run_daily(sell_am, time=CONFIG['schedule']['sell_am'])
     run_daily(sell_pm, time=CONFIG['schedule']['sell_pm'])
@@ -194,6 +226,12 @@ def initialize(context):
     g.portfolio_peak = 0            # 组合历史最高价值（用于回撤熔断）
     g.equity_history = []           # 每日净值历史（用于权益曲线过滤）
     g.portfolio_drawdown_triggered = False  # 组合回撤熔断是否触发
+
+    # 分时买入追踪变量
+    g.qualified_gap_down = []       # 首板低开合格股票列表（9:30筛选，9:35-9:55分时买入）
+    g.qualified_reversal = []       # 弱转强合格股票列表（9:30筛选，全天分时买入）
+    g.gap_down_bought = set()       # 已买入的首板低开股票
+    g.reversal_bought = set()       # 已买入的弱转强股票
 
     # 记录CONFIG配置
     _log_config()
@@ -216,6 +254,16 @@ def _log_config():
              f"低开{1-CONFIG['gap_down']['open_pct_max']:.1%}-{1-CONFIG['gap_down']['open_pct_min']:.1%}")
     log.info(f"  弱转强: {CONFIG['reversal']['increase_days']}日涨幅<={CONFIG['reversal']['increase_ratio_max']:.0%}, "
              f"金额{CONFIG['reversal']['money_min']/1e8:.0f}-{CONFIG['reversal']['money_max']/1e8:.0f}亿")
+    log.info(f"  首板低开分时买入: 检查时间{CONFIG['gap_down_buy']['check_times']}, "
+             f"最少{CONFIG['gap_down_buy']['min_bars']}根1分钟K线, "
+             f"波2/波1比率{CONFIG['gap_down_buy']['wave2_min_ratio']}-{CONFIG['gap_down_buy']['wave2_max_ratio']}")
+    log.info(f"  弱转强分时买入: 检查时间{CONFIG['reversal_buy']['check_times']}, "
+             f"KDJ({CONFIG['reversal_buy']['kdj_period']},{CONFIG['reversal_buy']['kdj_smooth_k']},"
+             f"{CONFIG['reversal_buy']['kdj_smooth_d']}), "
+             f"MACD({CONFIG['reversal_buy']['macd_fast']},{CONFIG['reversal_buy']['macd_slow']},"
+             f"{CONFIG['reversal_buy']['macd_signal']}), "
+             f"要求KDJ金叉={CONFIG['reversal_buy']['require_kdj_cross']}, "
+             f"要求MACD金叉={CONFIG['reversal_buy']['require_macd_cross']}")
 
     rc = CONFIG['risk_control']
     if rc['enabled']:
@@ -512,8 +560,13 @@ def buy(context):
         log.info("组合回撤熔断已触发，不买入新股票")
         return
 
+    # 重置分时买入追踪变量（每个交易日开始时重置）
+    g.qualified_gap_down = []
+    g.qualified_reversal = []
+    g.gap_down_bought = set()
+    g.reversal_bought = set()
+
     # 初始化股票列表
-    qualified_stocks = []
     gk_stocks = []
     dk_stocks = []
     rzq_stocks = []
@@ -559,7 +612,6 @@ def buy(context):
 
         # 如果股票满足所有条件，则添加到列表中
         gk_stocks.append(s)
-        qualified_stocks.append(s)
 
 
     date = transform_date(context.previous_date, 'str')
@@ -587,7 +639,6 @@ def buy(context):
             prev_day_data = attribute_history(s, 1, '1d', fields=['close', 'volume', 'money'], skip_paused=True)
             if prev_day_data['money'][0] >= gd['money_min']:
                 dk_stocks.append(s)
-                qualified_stocks.append(s)
 
 
     # ====== 弱转强策略 (reversal) ======
@@ -637,73 +688,410 @@ def buy(context):
 
         # 如果股票满足所有条件，则添加到列表中
         rzq_stocks.append(s)
-        qualified_stocks.append(s)
 
-    # ====== 构建股票→策略类型映射 ======
-    stock_strategy_map = {}
-    for s in gk_stocks:
-        stock_strategy_map[s] = '一进二'
-    for s in dk_stocks:
-        stock_strategy_map[s] = '首板低开'
-    for s in rzq_stocks:
-        stock_strategy_map[s] = '弱转强'
+    # ====== 板块集中度过滤（各策略独立过滤）======
+    gk_stocks = _check_sector_concentration(gk_stocks, context)
+    g.qualified_gap_down = _check_sector_concentration(dk_stocks, context)
+    g.qualified_reversal = _check_sector_concentration(rzq_stocks, context)
 
-    # ====== 板块集中度过滤 ======
-    qualified_stocks = _check_sector_concentration(qualified_stocks, context)
+    # ====== 执行一进二买入（9:30 立即执行）======
+    bought = _execute_buy(gk_stocks, '一进二', context, current_data)
 
-    # ====== 执行买入 ======
+    log.info(f"一进二买入 {len(bought)} 只, 首板低开待买入 {len(g.qualified_gap_down)} 只, "
+             f"弱转强待买入 {len(g.qualified_reversal)} 只")
+
+
+# ================================================
+# 买入执行与分时策略函数
+# ================================================
+
+def _execute_buy(stocks, strategy_name, context, current_data, price_dict=None):
+    """执行买入操作（通用）
+
+    Args:
+        stocks: 合格股票列表
+        strategy_name: 策略名称 ('一进二', '首板低开', '弱转强')
+        context: 上下文
+        current_data: 当前市场数据
+        price_dict: 可选的 {stock: price} 字典，指定每只股票的买入价。
+                    如果为 None，一进二使用 day_open，其他使用 last_price。
+
+    Returns:
+        已买入的股票列表
+    """
+    if not stocks:
+        return []
+
+    rc = CONFIG['risk_control']
     max_stock_num = CONFIG['global']['max_stock_num']
     cash_ratio_min = CONFIG['global']['cash_ratio_min']
     min_shares = CONFIG['global']['min_shares']
 
-    # 仅当有符合条件的股票且可用现金占总资产比例>阈值时执行买入
-    if len(qualified_stocks) != 0 and context.portfolio.available_cash / context.portfolio.total_value > cash_ratio_min:
-        # 获取当前持仓数量
-        current_position_count = len(context.portfolio.positions)
+    # 检查可用现金比例
+    if context.portfolio.available_cash / context.portfolio.total_value <= cash_ratio_min:
+        log.info(f"[{strategy_name}] 可用现金比例不足 {cash_ratio_min:.0%}，不买入")
+        return []
 
-        # 计算还能买入多少只股票
-        can_buy_count = min(max_stock_num - current_position_count, len(qualified_stocks))
+    # 获取当前持仓数量
+    current_position_count = len(context.portfolio.positions)
 
-        # 如果没有持仓名额了，直接返回
-        if can_buy_count <= 0:
-            log.info(f"持仓已达上限 {max_stock_num} 只，不再买入新股票")
-            return
+    # 计算还能买入多少只股票
+    can_buy_count = min(max_stock_num - current_position_count, len(stocks))
 
-        # 限制只买入前 can_buy_count 只股票
-        qualified_stocks = qualified_stocks[:can_buy_count]
+    if can_buy_count <= 0:
+        log.info(f"[{strategy_name}] 持仓已达上限 {max_stock_num} 只，不再买入")
+        return []
 
-        # 计算每只股票的买入金额，平均分配可用资金
-        value = context.portfolio.available_cash / len(qualified_stocks)
+    # 限制只买入前 can_buy_count 只股票
+    stocks = stocks[:can_buy_count]
 
-        # 熊市减仓: 如果市场环境为空头，按比例缩减买入金额
-        rc = CONFIG['risk_control']
-        if rc['enabled'] and rc['market_filter_enabled'] and not g.market_bullish:
-            value = value * rc['market_filter_position_scale']
-            log.info(f"熊市减仓: 买入金额缩减至{rc['market_filter_position_scale']:.0%}")
+    # 计算每只股票的买入金额，平均分配可用资金
+    value = context.portfolio.available_cash / len(stocks)
 
-        # 权益曲线过滤: 策略净值低于自身均线时，缩减买入金额
-        if rc['enabled'] and rc['equity_curve_filter_enabled']:
-            ma_period = rc['equity_curve_ma_period']
-            if len(g.equity_history) >= ma_period:
-                equity_ma = sum(g.equity_history[-ma_period:]) / ma_period
-                current_portfolio_value = context.portfolio.total_value
-                if current_portfolio_value < equity_ma:
-                    value = value * rc['equity_curve_position_scale']
-                    log.info(f"权益曲线过滤: 净值{current_portfolio_value:.0f} < MA{ma_period}={equity_ma:.0f}, "
-                             f"买入金额缩减至{rc['equity_curve_position_scale']:.0%}")
+    # 熊市减仓: 如果市场环境为空头，按比例缩减买入金额
+    if rc['enabled'] and rc['market_filter_enabled'] and not g.market_bullish:
+        value = value * rc['market_filter_position_scale']
+        log.info(f"[{strategy_name}] 熊市减仓: 买入金额缩减至{rc['market_filter_position_scale']:.0%}")
 
-        for s in qualified_stocks:
-            # 确保有足够资金买入至少min_shares股
-            if context.portfolio.available_cash / current_data[s].last_price > min_shares:
-                # 以开盘价买入
-                order_value(s, value, MarketOrderStyle(current_data[s].day_open))
-                # 初始化风险控制追踪数据
-                g.trailing_high[s] = current_data[s].day_open
-                g.purchase_dates[s] = context.current_dt.strftime("%Y-%m-%d")
-                g.partial_profit_taken[s] = False
-                g.stock_strategy[s] = stock_strategy_map.get(s, '未知')
+    # 权益曲线过滤: 策略净值低于自身均线时，缩减买入金额
+    if rc['enabled'] and rc['equity_curve_filter_enabled']:
+        ma_period = rc['equity_curve_ma_period']
+        if len(g.equity_history) >= ma_period:
+            equity_ma = sum(g.equity_history[-ma_period:]) / ma_period
+            current_portfolio_value = context.portfolio.total_value
+            if current_portfolio_value < equity_ma:
+                value = value * rc['equity_curve_position_scale']
+                log.info(f"[{strategy_name}] 权益曲线过滤: 净值{current_portfolio_value:.0f} < MA{ma_period}={equity_ma:.0f}, "
+                         f"买入金额缩减至{rc['equity_curve_position_scale']:.0%}")
 
-        log.info(f"买入 {len(qualified_stocks)} 只股票，当前持仓 {current_position_count + len(qualified_stocks)} 只")
+    bought = []
+    for s in stocks:
+        # 确定买入价格
+        if price_dict and s in price_dict:
+            order_price = price_dict[s]
+        elif strategy_name == '一进二':
+            order_price = current_data[s].day_open
+        else:
+            order_price = current_data[s].last_price
+
+        # 确保有足够资金买入至少min_shares股
+        if context.portfolio.available_cash / order_price > min_shares:
+            order_value(s, value, MarketOrderStyle(order_price))
+            # 初始化风险控制追踪数据
+            g.trailing_high[s] = order_price
+            g.purchase_dates[s] = context.current_dt.strftime("%Y-%m-%d")
+            g.partial_profit_taken[s] = False
+            g.stock_strategy[s] = strategy_name
+            bought.append(s)
+
+    if bought:
+        log.info(f"[{strategy_name}] 买入 {len(bought)} 只: {bought}，"
+                 f"当前持仓 {len(context.portfolio.positions)} 只")
+
+    return bought
+
+
+def _detect_2wave_low(stock, context):
+    """检测首板低开股票的2波低点买入信号
+
+    逻辑：开盘后观察1分钟K线，寻找两波下跌的低点。
+    当第二波低点接近或高于第一波低点时（ratio <= wave2_max_ratio），
+    说明卖压减弱，可能出现反弹，是买入时机。
+
+    Args:
+        stock: 股票代码
+        context: 上下文
+
+    Returns:
+        True 如果检测到2波低点买入信号，False 否则
+    """
+    gdb = CONFIG['gap_down_buy']
+    min_bars = gdb['min_bars']
+    wave2_min_ratio = gdb['wave2_min_ratio']
+    wave2_max_ratio = gdb['wave2_max_ratio']
+
+    try:
+        # 获取当日1分钟K线数据（请求60根，实际返回从开盘到当前的bar数）
+        bars = attribute_history(stock, 60, '1m', fields=['close', 'low', 'high'], skip_paused=True)
+        if bars is None or len(bars) < min_bars:
+            return False
+
+        lows = bars['low'].values
+
+        # 寻找波谷：局部最低点（low[i] < low[i-1] 且 low[i] <= low[i+1]）
+        troughs = []
+        for i in range(1, len(lows) - 1):
+            if lows[i] < lows[i - 1] and lows[i] <= lows[i + 1]:
+                troughs.append((i, lows[i]))
+        # 检查最后一个bar是否为低点
+        if len(lows) >= 2 and lows[-1] < lows[-2]:
+            troughs.append((len(lows) - 1, lows[-1]))
+
+        # 需要至少2个波谷才能判断2波低点
+        if len(troughs) < 2:
+            return False
+
+        # 取最后两个波谷
+        wave1_idx, wave1_low = troughs[-2]
+        wave2_idx, wave2_low = troughs[-1]
+
+        # 第二波低点相对于第一波低点的比率
+        # 如果 wave2_low / wave1_low <= wave2_max_ratio，说明第二波没有大幅跌破第一波
+        # 即卖压在减弱，可能形成双底或抬高底部
+        if wave1_low <= 0:
+            return False
+        ratio = wave2_low / wave1_low
+
+        if wave2_min_ratio <= ratio <= wave2_max_ratio:
+            log.info(f"[首板低开-2波低点] {stock} 检测到2波低点信号: "
+                     f"第1波低={wave1_low:.2f}(bar{wave1_idx}), "
+                     f"第2波低={wave2_low:.2f}(bar{wave2_idx}), "
+                     f"比率={ratio:.4f} (范围{wave2_min_ratio}-{wave2_max_ratio})")
+            return True
+
+        return False
+
+    except Exception as e:
+        log.warning(f"[首板低开-2波低点] {stock} 检测异常: {e}")
+        return False
+
+
+def _calc_kdj(closes, highs, lows, period=9, smooth_k=3, smooth_d=3):
+    """计算KDJ指标
+
+    Args:
+        closes: 收盘价序列 (numpy array)
+        highs: 最高价序列 (numpy array)
+        lows: 最低价序列 (numpy array)
+        period: KDJ周期
+        smooth_k: K值平滑周期
+        smooth_d: D值平滑周期
+
+    Returns:
+        (K, D, J) 序列的numpy数组
+    """
+    n = len(closes)
+    K = np.zeros(n)
+    D = np.zeros(n)
+    J = np.zeros(n)
+
+    # 计算RSV
+    rsv = np.full(n, 50.0)  # 默认值50
+    for i in range(period - 1, n):
+        high_n = np.max(highs[i - period + 1:i + 1])
+        low_n = np.min(lows[i - period + 1:i + 1])
+        if high_n != low_n:
+            rsv[i] = (closes[i] - low_n) / (high_n - low_n) * 100
+
+    # 计算K, D (SMA平滑)
+    K[period - 1] = rsv[period - 1]
+    D[period - 1] = rsv[period - 1]
+    for i in range(period, n):
+        K[i] = (smooth_k - 1) / smooth_k * K[i - 1] + 1.0 / smooth_k * rsv[i]
+        D[i] = (smooth_d - 1) / smooth_d * D[i - 1] + 1.0 / smooth_d * K[i]
+
+    # 计算J
+    J = 3 * K - 2 * D
+
+    return K, D, J
+
+
+def _calc_macd(closes, fast=12, slow=26, signal=9):
+    """计算MACD指标
+
+    Args:
+        closes: 收盘价序列 (numpy array)
+        fast: 快线周期
+        slow: 慢线周期
+        signal: 信号线周期
+
+    Returns:
+        (DIF, DEA, MACD_histogram) 序列的numpy数组
+    """
+    n = len(closes)
+
+    # 计算EMA
+    def ema(data, period):
+        result = np.zeros(n)
+        result[0] = data[0]
+        multiplier = 2.0 / (period + 1)
+        for i in range(1, n):
+            result[i] = (data[i] - result[i - 1]) * multiplier + result[i - 1]
+        return result
+
+    ema_fast = ema(closes, fast)
+    ema_slow = ema(closes, slow)
+
+    # DIF线 (快线-慢线)
+    dif = ema_fast - ema_slow
+
+    # DEA线 (DIF的EMA)
+    dea = np.zeros(n)
+    dea[0] = dif[0]
+    multiplier = 2.0 / (signal + 1)
+    for i in range(1, n):
+        dea[i] = (dif[i] - dea[i - 1]) * multiplier + dea[i - 1]
+
+    # MACD柱状图
+    macd_hist = 2 * (dif - dea)
+
+    return dif, dea, macd_hist
+
+
+def _check_golden_cross(stock, context):
+    """检测弱转强股票的KDJ/MACD金叉买入信号（15分钟级别）
+
+    逻辑：获取15分钟K线，计算KDJ和MACD指标，
+    检查最近是否出现金叉（K上穿D，DIF上穿DEA）。
+
+    Args:
+        stock: 股票代码
+        context: 上下文
+
+    Returns:
+        True 如果检测到金叉买入信号，False 否则
+    """
+    rvb = CONFIG['reversal_buy']
+    min_bars = rvb['min_15m_bars']
+    require_kdj = rvb['require_kdj_cross']
+    require_macd = rvb['require_macd_cross']
+
+    try:
+        # 获取15分钟K线数据
+        bars = attribute_history(stock, min_bars, '15m',
+                                fields=['close', 'low', 'high'], skip_paused=True)
+        if bars is None or len(bars) < min_bars:
+            return False
+
+        closes = np.array(bars['close'], dtype=float)
+        lows = np.array(bars['low'], dtype=float)
+        highs = np.array(bars['high'], dtype=float)
+
+        kdj_cross = False
+        macd_cross = False
+
+        # 检查KDJ金叉
+        if require_kdj:
+            K, D, J = _calc_kdj(closes, highs, lows,
+                               period=rvb['kdj_period'],
+                               smooth_k=rvb['kdj_smooth_k'],
+                               smooth_d=rvb['kdj_smooth_d'])
+            # 检查最近2根K线是否出现金叉：前一根K<=D，当前一根K>D
+            if len(K) >= 2 and K[-2] <= D[-2] and K[-1] > D[-1]:
+                kdj_cross = True
+                log.info(f"[弱转强-金叉] {stock} KDJ金叉: K={K[-1]:.2f}, D={D[-1]:.2f}, J={J[-1]:.2f}")
+
+        # 检查MACD金叉
+        if require_macd:
+            dif, dea, macd_hist = _calc_macd(closes,
+                                             fast=rvb['macd_fast'],
+                                             slow=rvb['macd_slow'],
+                                             signal=rvb['macd_signal'])
+            # 检查最近2根K线是否出现金叉：前一根DIF<=DEA，当前一根DIF>DEA
+            if len(dif) >= 2 and dif[-2] <= dea[-2] and dif[-1] > dea[-1]:
+                macd_cross = True
+                log.info(f"[弱转强-金叉] {stock} MACD金叉: DIF={dif[-1]:.4f}, DEA={dea[-1]:.4f}")
+
+        # 根据配置要求判断是否满足条件
+        if require_kdj and require_macd:
+            return kdj_cross and macd_cross
+        elif require_kdj:
+            return kdj_cross
+        elif require_macd:
+            return macd_cross
+        else:
+            # 都不要求，则只要有一个金叉即可
+            return kdj_cross or macd_cross
+
+    except Exception as e:
+        log.warning(f"[弱转强-金叉] {stock} 检测异常: {e}")
+        return False
+
+
+def buy_gap_down(context):
+    """首板低开分时买入函数（09:35-09:55 每5分钟执行）
+
+    在每个检查时间点，遍历首板低开合格股票列表，
+    使用2波低点策略寻找买入时机。
+    """
+    # 如果没有待买入的首板低开股票，直接返回
+    if not g.qualified_gap_down:
+        return
+
+    rc = CONFIG['risk_control']
+
+    # 风控检查: 日亏损限制触发时不买入
+    if rc['enabled'] and g.daily_loss_triggered:
+        return
+    # 风控检查: 组合回撤熔断触发时不买入
+    if rc['enabled'] and rc['portfolio_drawdown_enabled'] and rc['portfolio_drawdown_no_buy'] and g.portfolio_drawdown_triggered:
+        return
+
+    current_data = get_current_data()
+    buy_candidates = []
+
+    for s in g.qualified_gap_down:
+        # 跳过已买入的股票
+        if s in g.gap_down_bought:
+            continue
+        # 跳过已持仓的股票
+        if s in context.portfolio.positions:
+            g.gap_down_bought.add(s)
+            continue
+        # 跳过停牌股票
+        if current_data[s].paused:
+            continue
+
+        # 检测2波低点信号
+        if _detect_2wave_low(s, context):
+            buy_candidates.append(s)
+
+    if buy_candidates:
+        bought = _execute_buy(buy_candidates, '首板低开', context, current_data)
+        g.gap_down_bought.update(bought)
+
+
+def buy_reversal(context):
+    """弱转强分时买入函数（09:45-14:30 每15分钟执行）
+
+    在每个检查时间点，遍历弱转强合格股票列表，
+    使用15分钟KDJ/MACD金叉策略寻找买入时机。
+    """
+    # 如果没有待买入的弱转强股票，直接返回
+    if not g.qualified_reversal:
+        return
+
+    rc = CONFIG['risk_control']
+
+    # 风控检查: 日亏损限制触发时不买入
+    if rc['enabled'] and g.daily_loss_triggered:
+        return
+    # 风控检查: 组合回撤熔断触发时不买入
+    if rc['enabled'] and rc['portfolio_drawdown_enabled'] and rc['portfolio_drawdown_no_buy'] and g.portfolio_drawdown_triggered:
+        return
+
+    current_data = get_current_data()
+    buy_candidates = []
+
+    for s in g.qualified_reversal:
+        # 跳过已买入的股票
+        if s in g.reversal_bought:
+            continue
+        # 跳过已持仓的股票
+        if s in context.portfolio.positions:
+            g.reversal_bought.add(s)
+            continue
+        # 跳过停牌股票
+        if current_data[s].paused:
+            continue
+
+        # 检测KDJ/MACD金叉信号
+        if _check_golden_cross(s, context):
+            buy_candidates.append(s)
+
+    if buy_candidates:
+        bought = _execute_buy(buy_candidates, '弱转强', context, current_data)
+        g.reversal_bought.update(bought)
 
 
 # ================================================
