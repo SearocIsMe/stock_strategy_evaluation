@@ -41,7 +41,6 @@ CONFIG = {
         'sell_heavy_turnover': '10:00',   # 高位放量卖出
         'sell_am': '11:25',              # 上午收盘前止盈
         'sell_pm': '13:15',              # 下午收盘前止盈/止损
-        'log_position_stats': '14:55',   # 每日持仓统计
     },
 
     # ------ 一进二策略参数 (gap_up) ------
@@ -49,8 +48,8 @@ CONFIG = {
         'avg_price_increase_min': 0.07,     # 均价增长最低要求（相对收盘价×1.1）
         'money_min': 5.5e8,                 # 最低成交金额
         'money_max': 20e8,                  # 最高成交金额
-        'market_cap_min': 75,               # 最低总市值（亿）
-        'circulating_market_cap_max': 520,  # 最高流通市值（亿）
+        'market_cap_min': 5,               # 最低总市值（亿）
+        'circulating_market_cap_max': 75,  # 最高流通市值（亿）
         'auction_vol_ratio_min': 0.03,      # 集合竞价成交量/昨日成交量 最低比例
         'current_ratio_min': 1.0,           # 开盘价/昨日涨停价 下限
         'current_ratio_max': 1.06,          # 开盘价/昨日涨停价 上限
@@ -73,8 +72,8 @@ CONFIG = {
         'avg_price_increase_min': -0.04,    # 均价增长最低要求
         'money_min': 3e8,                   # 最低成交金额
         'money_max': 19e8,                  # 最高成交金额
-        'market_cap_min': 75,               # 最低总市值（亿）
-        'circulating_market_cap_max': 520,  # 最高流通市值（亿）
+        'market_cap_min': 3000,               # 最低总市值（亿）
+        'circulating_market_cap_max': 20000,  # 最高流通市值（亿）
         'auction_vol_ratio_min': 0.03,      # 集合竞价成交量/昨日成交量 最低比例
         'current_ratio_min': 0.98,          # 开盘价/昨日涨停价 下限
         'current_ratio_max': 1.09,          # 开盘价/昨日涨停价 上限
@@ -106,7 +105,7 @@ CONFIG = {
 
     # ------ 风险控制参数 ------
     'risk_control': {
-        'enabled': True,  # 风险控制总开关（False时所有风控措施均不生效）
+        'enabled': False,  # 风险控制总开关（False时所有风控措施均不生效）
 
         # ====== 核心风控（对回撤影响最大）======
 
@@ -133,17 +132,17 @@ CONFIG = {
         # 移动止盈: 盈利超过 activation_profit 后，从最高价回撤 trailing_stop_pct 时卖出
         'trailing_stop_enabled': True,
         'trailing_stop_activation_profit': 0.05,    # 激活条件: 盈利5%
-        'trailing_stop_pct': 0.03,                  # 回撤阈值: 从最高价回撤3%
+        'trailing_stop_pct': 0.04,                  # 回撤阈值: 从最高价回撤3%
 
         # 市场环境过滤: 当指数低于N日均线时，降低新买入仓位
         'market_filter_enabled': True,
         'market_index': '000300.XSHG',              # 参考指数（沪深300）
-        'market_ma_period': 20,                      # 均线周期
+        'market_ma_period': 21,                      # 均线周期
         'market_filter_position_scale': 0.5,         # 熊市时仓位缩减比例
 
         # 单日最大亏损限制: 当日亏损超过阈值时减仓并禁止新买入
         'daily_loss_limit_enabled': True,
-        'daily_loss_limit': -0.03,                   # 日亏损阈值: -3%
+        'daily_loss_limit': -0.04,                   # 日亏损阈值: -3%
         'daily_loss_reduce_ratio': 0.5,              # 触发后减仓比例
 
         # 板块集中度限制: 同一行业最多持有N只股票
@@ -181,12 +180,10 @@ def initialize(context):
     run_daily(sell_heavy_turnover, time=CONFIG['schedule']['sell_heavy_turnover'])
     run_daily(sell_am, time=CONFIG['schedule']['sell_am'])
     run_daily(sell_pm, time=CONFIG['schedule']['sell_pm'])
-    run_daily(log_position_stats, time=CONFIG['schedule']['log_position_stats'])
 
     # 风险控制追踪变量
     g.trailing_high = {}            # {stock: highest_price_since_purchase} 移动止盈最高价
     g.purchase_dates = {}           # {stock: purchase_date_str} 买入日期
-    g.stock_strategy = {}           # {stock: strategy_type} 持仓股票的策略来源（'一进二'/'首板低开'/'弱转强'）
     g.day_start_value = 0           # 每日开始时组合价值（用于日亏损计算）
     g.daily_loss_triggered = False  # 是否触发日亏损限制
     g.market_bullish = True         # 市场是否处于多头趋势
@@ -289,7 +286,7 @@ def _update_trailing_highs(context):
     current_positions = set(context.portfolio.positions.keys())
 
     # 清理已卖出股票的追踪数据
-    for tracking_dict in [g.trailing_high, g.purchase_dates, g.partial_profit_taken, g.stock_strategy]:
+    for tracking_dict in [g.trailing_high, g.purchase_dates, g.partial_profit_taken]:
         for s in list(tracking_dict.keys()):
             if s not in current_positions:
                 del tracking_dict[s]
@@ -639,15 +636,6 @@ def buy(context):
         rzq_stocks.append(s)
         qualified_stocks.append(s)
 
-    # ====== 构建股票→策略类型映射 ======
-    stock_strategy_map = {}
-    for s in gk_stocks:
-        stock_strategy_map[s] = '一进二'
-    for s in dk_stocks:
-        stock_strategy_map[s] = '首板低开'
-    for s in rzq_stocks:
-        stock_strategy_map[s] = '弱转强'
-
     # ====== 板块集中度过滤 ======
     qualified_stocks = _check_sector_concentration(qualified_stocks, context)
 
@@ -701,7 +689,6 @@ def buy(context):
                 g.trailing_high[s] = current_data[s].day_open
                 g.purchase_dates[s] = context.current_dt.strftime("%Y-%m-%d")
                 g.partial_profit_taken[s] = False
-                g.stock_strategy[s] = stock_strategy_map.get(s, '未知')
 
         log.info(f"买入 {len(qualified_stocks)} 只股票，当前持仓 {current_position_count + len(qualified_stocks)} 只")
 
@@ -1067,56 +1054,6 @@ def sell_pm(context):
                 order_target_value(s, 0)
                 log.info(f"时间止损: {s} 持仓{holding_days}天, 盈利{profit_ratio:.2%}")
                 continue
-
-
-# ================================================
-# 每日持仓统计
-# ================================================
-def log_position_stats(context):
-    """每日持仓统计：每股盈利、总体盈利、策略类型、各策略盈利占比"""
-    current_data = get_current_data()
-    positions = context.portfolio.positions
-
-    if not positions:
-        log.info("持仓统计: 当前无持仓")
-        return
-
-    total_profit = 0.0          # 总体持仓盈利金额
-    strategy_profit = {}        # {策略类型: 盈利金额}
-    strategy_count = {}         # {策略类型: 持仓数量}
-
-    log.info("=" * 60)
-    log.info("持仓统计:")
-
-    for s in list(positions):
-        pos = positions[s]
-        if pos.total_amount == 0:
-            continue
-
-        profit = (current_data[s].last_price - pos.avg_cost) * pos.total_amount
-        profit_ratio = (current_data[s].last_price - pos.avg_cost) / pos.avg_cost
-        strategy = g.stock_strategy.get(s, '未知')
-
-        total_profit += profit
-        strategy_profit[strategy] = strategy_profit.get(strategy, 0) + profit
-        strategy_count[strategy] = strategy_count.get(strategy, 0) + 1
-
-        stock_name = current_data[s].name
-        log.info(f"  {s} {stock_name} | 策略={strategy} | 盈利={profit_ratio:+.2%} | 盈亏额={profit:+.0f}")
-
-    # 总体盈利
-    total_value = context.portfolio.total_value
-    log.info(f"  总体持仓盈亏额: {total_profit:+.0f} | 总资产: {total_value:.0f}")
-
-    # 各策略统计
-    log.info("  各策略统计:")
-    for strategy in sorted(strategy_profit.keys()):
-        sp = strategy_profit[strategy]
-        sc = strategy_count[strategy]
-        ratio = sp / total_profit * 100 if total_profit != 0 else 0
-        log.info(f"    {strategy}: {sc}只, 盈亏额={sp:+.0f}, 占比={ratio:.1f}%")
-
-    log.info("=" * 60)
 
 
 # ================================================
