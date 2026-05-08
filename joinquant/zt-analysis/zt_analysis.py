@@ -50,6 +50,9 @@ CONFIG = {
     'zt_threshold': 9.8,                 # 涨停判断阈值（%）
     'N_days': [1, 2, 3, 4, 5],           # 分析的N日范围
     'top_k': 3,                          # 输出 Top K 股票
+    'reference_date': None,              # 参考日期（None=今天），T+N收益超过此日期的填NULL
+    'max_zt_age_days': 30,               # 涨停日距参考日期超过此天数的标的将被过滤
+    'output_dir': '.',                    # 结果输出目录（'.'=当前目录）
     'score_weights': {
         'price_strength': 30,
         'trend_structure': 20,
@@ -134,6 +137,10 @@ COLUMN_NAME_CN = {
     # 预测
     'entry_index': '建仓指数', 'prediction': '预测', 'signal': '信号',
     'buy_price': '建议买入价', 'stop_loss': '止损价', 'target_price': '目标价',
+    # 持仓建议
+    'position_advice': '持仓建议', 'hold_reason': '持仓理由',
+    'current_return': '当前收益', 'defense_status': '防守线状态',
+    'action_price': '操作价位',
     # 新增评分维度
     'volume_surge_score': '放量首板分', 'short_term_gene_score': '短线基因分', 'hot_sector_score': '热点板块分',
     'factor_volume_surge': '放量首板量比', 'factor_volume_surge_flag': '放量首板标记',
@@ -463,6 +470,93 @@ def _dedup_columns(df):
     return df.loc[:, ~df.columns.duplicated()]
 
 
+def _get_reference_date():
+    """
+    获取参考日期。CONFIG['reference_date'] 为 None 时返回今天。
+    用于判断 T+N 收益是否已发生：zt_date + N 交易日 > reference_date 的收益应置 NULL。
+    """
+    ref = CONFIG.get('reference_date', None)
+    if ref is None:
+        return pd.Timestamp(dt.datetime.now().date())
+    if isinstance(ref, str):
+        return pd.Timestamp(ref)
+    return pd.Timestamp(ref)
+
+
+def _count_trading_days_between(start_date, end_date):
+    """
+    计算从 start_date 次日到 end_date 之间的交易日数量。
+    
+    即涨停日为 start_date，到 end_date 为止已经历了多少个交易日。
+    例: start_date=周一, end_date=周二 → 1; end_date=周三 → 2
+    
+    优先使用 JQ 的 get_trade_days()；不可用时用工作日近似。
+    """
+    if pd.isna(start_date) or pd.isna(end_date):
+        return 0
+    
+    start = pd.Timestamp(start_date)
+    end = pd.Timestamp(end_date)
+    
+    if end <= start:
+        return 0
+    
+    if JQ_AVAILABLE:
+        try:
+            # get_trade_days 返回 start_date ~ end_date 之间的所有交易日（含两端）
+            trade_days = get_trade_days(start_date=start.strftime('%Y-%m-%d'),
+                                         end_date=end.strftime('%Y-%m-%d'))
+            # 不含 start_date 当天（涨停日本身不算第1个交易日）
+            count = len(trade_days) - 1 if len(trade_days) > 0 else 0
+            return max(count, 0)
+        except Exception:
+            pass
+    
+    # Fallback: 用工作日近似（排除周末，不排除节假日）
+    bdays = pd.bdate_range(start + timedelta(days=1), end)
+    return len(bdays)
+
+
+def _nullify_future_returns(df):
+    """
+    将未来日期的 return_n* 及相关列置为 NaN。
+    
+    对于每只股票，如果 zt_date + N 个交易日 > reference_date，
+    则 return_n{n}、close_n{n}、high_n{n}、low_n{n}、volume_n{n}、
+    amount_n{n}、max_return_n{n}、max_drawdown_n{n} 均设为 NaN。
+    
+    这确保了"未来时间不会有收益，应该填 NULL"的数据完整性要求。
+    """
+    ref_date = _get_reference_date()
+    nullified_count = 0
+    
+    # 需要置空的列模板
+    n_suffixes = ['close_n{}', 'high_n{}', 'low_n{}', 'volume_n{}', 'amount_n{}',
+                   'return_n{}', 'max_return_n{}', 'max_drawdown_n{}']
+    
+    for idx, row in df.iterrows():
+        zt_date = row.get('zt_date', None)
+        if pd.isna(zt_date):
+            continue
+        
+        # 计算从涨停日到参考日期之间已经历了多少个交易日
+        elapsed_days = _count_trading_days_between(zt_date, ref_date)
+        
+        # 对于 n > elapsed_days 的，这些是未来日期，应置空
+        for n in CONFIG['N_days']:
+            if n > elapsed_days:
+                for suffix in n_suffixes:
+                    col = suffix.format(n)
+                    if col in df.columns and not pd.isna(df.at[idx, col]):
+                        df.at[idx, col] = np.nan
+                        nullified_count += 1
+    
+    if nullified_count > 0:
+        print(f"[get_price_data] 已将 {nullified_count} 个未来日期的 T+N 收益值置为 NULL（参考日期: {ref_date.strftime('%Y-%m-%d')}）")
+    
+    return df
+
+
 def _normalize_jq_code(code_str):
     """
     将各种格式的股票代码标准化为 JoinQuant 格式。
@@ -611,7 +705,7 @@ def clean_data(raw_df, filter_st=True, filter_yizhi=True):
         df['code'] = df['code'].astype(str).str.strip()
         df['jq_code'] = df['code'].apply(_normalize_jq_code)
 
-    # ---- 2.8 过滤：涨停日距当前 > 6 天 ----
+    # ---- 2.8 过滤：涨停日距当前 > max_days_from_zt 天 ----
     if 'zt_date' in df.columns:
         today = dt.datetime.now()
         max_date = today - timedelta(days=CONFIG['max_days_from_zt'] + 3)  # 加缓冲
@@ -626,6 +720,17 @@ def clean_data(raw_df, filter_st=True, filter_yizhi=True):
                 df = df[df['zt_date'] >= max_date]
         else:
             df = df[df['zt_date'] >= max_date]
+
+    # ---- 2.8b 过滤：涨停日距参考日期 > max_zt_age_days 天 ----
+    max_zt_age = CONFIG.get('max_zt_age_days', 30)
+    if max_zt_age and 'zt_date' in df.columns:
+        ref_date = _get_reference_date()
+        age_cutoff = ref_date - timedelta(days=max_zt_age)
+        before_count = len(df)
+        df = df[df['zt_date'] >= age_cutoff]
+        removed = before_count - len(df)
+        if removed > 0:
+            print(f"[clean_data] 涨停日超过 {max_zt_age} 天（早于 {age_cutoff.strftime('%Y-%m-%d')}）的标的已过滤: {removed} 只")
 
     # ---- 2.9 过滤：停牌 ----
     if JQ_AVAILABLE and 'jq_code' in df.columns:
@@ -874,6 +979,8 @@ def get_price_data(cleaned_df, n_days=5):
     if not JQ_AVAILABLE:
         print("[get_price_data] JQ 不可用，使用模拟数据")
         df = _simulate_price_data(df, n_days)
+        # 将未来日期的 T+N 收益置 NULL
+        df = _nullify_future_returns(df)
         return df
 
     # 存储每只股票的 N 日数据
@@ -1017,6 +1124,11 @@ def get_price_data(cleaned_df, n_days=5):
     # 当涨停日太近（如今天/昨天），JQ API 无法获取足够的后续行情，
     # 此时用 CSV 中的 自选收益/涨幅%/最新价 等字段估算 N 日收益
     df = _fill_missing_returns(df)
+
+    # ---- 将未来日期的 T+N 收益置 NULL ----
+    # _fill_missing_returns 可能用估算值填充了未来日期的收益，
+    # 这里按 reference_date 将尚未发生的收益强制置空，确保数据完整性
+    df = _nullify_future_returns(df)
 
     print(f"[get_price_data] 行情数据获取完成")
 
@@ -2505,15 +2617,16 @@ def _generate_trade_signal(candidates_df):
 def output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
                    scored_df, corr_df, predict_df=None, factor_eff=None):
     """
-    输出7个表 + 交易候选排序。
+    输出8个表 + 交易候选排序。
 
     表1: 清洗后股票列表
     表2: N日表现表
     表3: 强势股列表（重点）
     表4: 因子相关性表
-    表5: 因子有效性分析表（新增）
-    表6: 每日交易候选排序表
-    表7: 次日建仓预测表
+    表5: 因子有效性分析表
+    表6: 当日交易候选排序表（基于已确认数据，适合当日盘中/尾盘决策）
+    表7: 次日建仓预测表（次日 = 参考日期的下一个交易日）
+    表8: 前日推荐持仓建议表（针对表7已推荐建仓的股票，给出持仓/止盈/止损建议）
     """
     print('\n' + '=' * 80)
     print('涨停板股票后 N 日走势分析 — 结果输出')
@@ -2600,9 +2713,11 @@ def output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
     else:
         print('无因子有效性分析数据')
 
-    # ---- 表6: 每日交易候选排序表 ----
+    # ---- 表6: 当日交易候选排序表 ----
     print('\n' + '─' * 60)
-    print('📊 表6: 每日交易候选排序表')
+    print('📊 表6: 当日交易候选排序表（基于当前已确认数据）')
+    print('  说明: 筛选强势/平稳股，按评分排序，给出当日交易信号。')
+    print('  交易信号基于已发生的量价数据，适合当日盘中/尾盘决策。')
     print('─' * 60)
 
     if not scored_df.empty:
@@ -2621,16 +2736,26 @@ def output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
         if len(candidates) > top_k:
             print(f'\n🏆 主选股票 (Top {top_k}):')
             _display(candidates[available_cols_5].head(top_k).rename(columns=cn_map_5))
-            print(f'\n📋 候补股票:')
-            _display(candidates[available_cols_5].iloc[top_k:].rename(columns=cn_map_5))
+            backup_df = candidates[available_cols_5].iloc[top_k:].rename(columns=cn_map_5)
+            print(f'\n📋 候补股票 ({len(backup_df)} 只):')
+            _CHUNK = 50
+            for chunk_start in range(0, len(backup_df), _CHUNK):
+                chunk_end = min(chunk_start + _CHUNK, len(backup_df))
+                if len(backup_df) > _CHUNK:
+                    print(f'  ── 第 {chunk_start+1}-{chunk_end} 行 ──')
+                with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+                    _display(backup_df.iloc[chunk_start:chunk_end])
         else:
             _display(candidates[available_cols_5].rename(columns=cn_map_5))
     else:
         print('无候选股票')
 
     # ---- 表7: 次日建仓预测表 ----
+    ref_date_str = _get_reference_date().strftime('%Y-%m-%d')
     print('\n' + '─' * 60)
-    print('📊 表7: 次日建仓预测表（🔮）')
+    print(f'📊 表7: 次日建仓预测表（🔮 参考日期: {ref_date_str}）')
+    print('  说明: "次日" = 参考日期的下一个交易日。')
+    print('  基于建仓指数(entry_index)预测下一个交易日是否适合建仓。')
     print('─' * 60)
 
     if predict_df is not None and not predict_df.empty:
@@ -2645,8 +2770,15 @@ def output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
         if len(predict_df) > top_k:
             print(f'\n🏆 主选建仓标的 (Top {top_k}):')
             _display(predict_df[available_cols_6].head(top_k).rename(columns=cn_map_6))
-            print(f'\n📋 候补建仓标的:')
-            _display(predict_df[available_cols_6].iloc[top_k:].rename(columns=cn_map_6))
+            backup_df_6 = predict_df[available_cols_6].iloc[top_k:].rename(columns=cn_map_6)
+            print(f'\n📋 候补建仓标的 ({len(backup_df_6)} 只):')
+            _CHUNK = 50
+            for chunk_start in range(0, len(backup_df_6), _CHUNK):
+                chunk_end = min(chunk_start + _CHUNK, len(backup_df_6))
+                if len(backup_df_6) > _CHUNK:
+                    print(f'  ── 第 {chunk_start+1}-{chunk_end} 行 ──')
+                with pd.option_context('display.max_rows', None, 'display.max_columns', None):
+                    _display(backup_df_6.iloc[chunk_start:chunk_end])
         else:
             _display(predict_df[available_cols_6].rename(columns=cn_map_6))
 
@@ -2663,6 +2795,107 @@ def output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
                   if not pd.isna(buy) else f'  {signal} {name}: 数据不足')
     else:
         print('无次日建仓预测数据')
+
+    # ---- 表8: 前日推荐持仓建议表 ----
+    print('\n' + '─' * 60)
+    print('📊 表8: 前日推荐持仓建议表（📋 新增）')
+    print('  说明: 针对表7中已推荐建仓的股票，给出当前是否应继续持仓的建议。')
+    print('  判断依据: 防守线状态、当前收益、分类变化、目标价达成情况。')
+    print('─' * 60)
+
+    if predict_df is not None and not predict_df.empty:
+        # 筛选表7中有建仓信号的股票（积极建仓/适度建仓）
+        position_candidates = predict_df[
+            predict_df['signal'].isin(['🟢 积极建仓', '🟡 适度建仓'])
+        ].copy() if 'signal' in predict_df.columns else pd.DataFrame()
+
+        if not position_candidates.empty:
+            position_advice_list = []
+            for idx, row in position_candidates.iterrows():
+                zt_close = row.get('zt_close', np.nan)
+                latest_price = row.get('latest_price', np.nan)
+                classification = row.get('classification', '')
+                stop_loss = row.get('stop_loss', np.nan)
+                target_price = row.get('target_price', np.nan)
+                entry_index = row.get('entry_index', 0)
+
+                # 计算当前收益
+                current_return = np.nan
+                if not pd.isna(latest_price) and not pd.isna(zt_close) and zt_close > 0:
+                    current_return = (latest_price - zt_close) / zt_close
+
+                # 防守线状态
+                defense_line_pct = CONFIG['defense_line']
+                defense_status = '未知'
+                if not pd.isna(current_return):
+                    if current_return < defense_line_pct:
+                        defense_status = '🔴 已破防守线'
+                    elif current_return < defense_line_pct + 0.02:
+                        defense_status = '🟡 接近防守线'
+                    else:
+                        defense_status = '🟢 远离防守线'
+
+                # 目标价达成
+                target_reached = False
+                if not pd.isna(latest_price) and not pd.isna(target_price) and target_price > 0:
+                    target_reached = latest_price >= target_price
+
+                # 生成持仓建议
+                if not pd.isna(current_return) and current_return < defense_line_pct:
+                    advice = '🔴 止损卖出'
+                    reason = f'已破防守线({defense_line_pct:.0%})，当前收益{current_return:.2%}'
+                    action_price = stop_loss
+                elif target_reached:
+                    advice = '💰 止盈卖出'
+                    reason = f'已达目标价{target_price:.2f}，当前价{latest_price:.2f}'
+                    action_price = target_price
+                elif classification == '弱势':
+                    advice = '🟠 减仓观望'
+                    reason = '分类已转为弱势，建议减仓'
+                    action_price = latest_price
+                elif defense_status == '🟡 接近防守线':
+                    advice = '🟡 谨慎持仓'
+                    reason = f'接近防守线，当前收益{current_return:.2%}'
+                    action_price = stop_loss
+                elif classification == '强势':
+                    advice = '🟢 继续持仓'
+                    reason = '强势运行中，远离防守线'
+                    action_price = target_price
+                else:
+                    advice = '🟢 继续持仓'
+                    reason = '平稳运行，防守线安全'
+                    action_price = target_price
+
+                position_advice_list.append({
+                    'position_advice': advice,
+                    'hold_reason': reason,
+                    'current_return': round(current_return, 4) if not pd.isna(current_return) else np.nan,
+                    'defense_status': defense_status,
+                    'action_price': round(action_price, 2) if not pd.isna(action_price) else np.nan,
+                })
+
+            advice_df = pd.DataFrame(position_advice_list, index=position_candidates.index)
+            position_result = pd.concat([position_candidates, advice_df], axis=1)
+            position_result = _dedup_columns(position_result)
+
+            display_cols_8 = ['code', 'name', 'zt_date', 'zt_close', 'latest_price',
+                              'entry_index', 'signal', 'current_return', 'defense_status',
+                              'position_advice', 'hold_reason', 'action_price']
+            available_cols_8 = [c for c in display_cols_8 if c in position_result.columns]
+            cn_map_8 = {c: COLUMN_NAME_CN.get(c, c) for c in available_cols_8}
+            _display(position_result[available_cols_8].rename(columns=cn_map_8))
+
+            # 输出持仓建议汇总
+            print(f'\n💡 持仓建议汇总:')
+            for _, row in position_result.iterrows():
+                name = row.get('name', row.get('code', 'N/A'))
+                advice = row.get('position_advice', 'N/A')
+                reason = row.get('hold_reason', '')
+                print(f'  {advice} {name}: {reason}')
+        else:
+            print('表7中无积极建仓/适度建仓的推荐股票，无需持仓建议')
+    else:
+        print('无次日建仓预测数据，无法生成持仓建议')
 
     # ---- 汇总统计 ----
     print('\n' + '=' * 80)
@@ -2780,12 +3013,143 @@ def run_analysis(file_path=None, filter_st=True, filter_yizhi=True):
 print('✅ run_analysis() 已定义')
 
 
+# ## 13.5 结果导出
+
+# In[15.5]:
+
+
+def export_results(results, output_dir=None):
+    """
+    将分析结果导出为文件。
+
+    优先导出为单个 Excel 文件（多 Sheet），若 openpyxl 不可用则逐表导出 CSV。
+
+    Parameters
+    ----------
+    results : dict
+        run_analysis() 返回的结果字典
+    output_dir : str, optional
+        输出目录，默认使用 CONFIG['output_dir']
+    """
+    import os
+
+    if not results:
+        print('[export_results] 结果为空，跳过导出')
+        return
+
+    out_dir = output_dir or CONFIG.get('output_dir', '.')
+    if not os.path.exists(out_dir):
+        os.makedirs(out_dir, exist_ok=True)
+
+    ref_date_str = _get_reference_date().strftime('%Y%m%d')
+    excel_path = os.path.join(out_dir, f'zt_analysis_result_{ref_date_str}.xlsx')
+
+    # 定义要导出的表（key, 中文名, 是否为 DataFrame）
+    export_tables = [
+        ('cleaned_df',    '清洗后股票列表',  True),
+        ('n_day_df',      'N日统计',         True),
+        ('strong_df',     '强势股',          True),
+        ('neutral_df',    '平稳股',          True),
+        ('weak_df',       '弱势股',          True),
+        ('scored_df',     '评分排序',        True),
+        ('corr_df',       '因子相关性',      True),
+        ('predict_df',    '次日建仓预测',    True),
+    ]
+
+    # ---- 计算候补股票 / 候补建仓标的（与 output_results 逻辑一致） ----
+    top_k = CONFIG['top_k']
+    backup_candidates_df = pd.DataFrame()  # 候补股票
+    backup_predict_df = pd.DataFrame()     # 候补建仓标的
+
+    scored_df = results.get('scored_df')
+    if scored_df is not None and isinstance(scored_df, pd.DataFrame) and not scored_df.empty:
+        candidates = scored_df[scored_df['classification'].isin(['强势', '平稳'])].copy()
+        if 'total_score' in candidates.columns:
+            candidates = candidates.sort_values('total_score', ascending=False)
+        if len(candidates) > top_k:
+            backup_candidates_df = candidates.iloc[top_k:]
+
+    predict_df = results.get('predict_df')
+    if predict_df is not None and isinstance(predict_df, pd.DataFrame) and not predict_df.empty:
+        if len(predict_df) > top_k:
+            backup_predict_df = predict_df.iloc[top_k:]
+
+    # ---- 尝试 Excel 多 Sheet 导出 ----
+    try:
+        import openpyxl  # noqa: F401 — 仅检测是否可用
+        with pd.ExcelWriter(excel_path, engine='openpyxl') as writer:
+            for key, sheet_name, is_df in export_tables:
+                df = results.get(key)
+                if df is None:
+                    continue
+                if is_df and isinstance(df, pd.DataFrame) and not df.empty:
+                    # Sheet 名最长 31 字符（Excel 限制）
+                    sn = sheet_name[:31]
+                    df.to_excel(writer, sheet_name=sn, index=False)
+            # 候补股票 / 候补建仓标的 单独 Sheet
+            if not backup_candidates_df.empty:
+                backup_candidates_df.to_excel(writer, sheet_name='候补股票', index=False)
+            if not backup_predict_df.empty:
+                backup_predict_df.to_excel(writer, sheet_name='候补建仓标的', index=False)
+            # factor_eff 是 dict，单独处理
+            factor_eff = results.get('factor_eff')
+            if factor_eff and isinstance(factor_eff, dict):
+                for sub_key, sub_df in factor_eff.items():
+                    if isinstance(sub_df, pd.DataFrame) and not sub_df.empty:
+                        sn = f'因子有效性_{sub_key}'[:31]
+                        sub_df.to_excel(writer, sheet_name=sn, index=False)
+        print(f'[export_results] ✅ 已导出 Excel: {excel_path}')
+        return
+    except ImportError:
+        print('[export_results] openpyxl 不可用，改为 CSV 导出')
+    except Exception as e:
+        print(f'[export_results] Excel 导出失败 ({e})，改为 CSV 导出')
+
+    # ---- CSV fallback ----
+    csv_count = 0
+    for key, cn_name, is_df in export_tables:
+        df = results.get(key)
+        if df is None:
+            continue
+        if is_df and isinstance(df, pd.DataFrame) and not df.empty:
+            csv_path = os.path.join(out_dir, f'zt_{key}_{ref_date_str}.csv')
+            df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+            csv_count += 1
+
+    # 候补股票 / 候补建仓标的 CSV
+    if not backup_candidates_df.empty:
+        csv_path = os.path.join(out_dir, f'zt_backup_candidates_{ref_date_str}.csv')
+        backup_candidates_df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        csv_count += 1
+    if not backup_predict_df.empty:
+        csv_path = os.path.join(out_dir, f'zt_backup_predict_{ref_date_str}.csv')
+        backup_predict_df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+        csv_count += 1
+
+    # factor_eff dict → 各子表 CSV
+    factor_eff = results.get('factor_eff')
+    if factor_eff and isinstance(factor_eff, dict):
+        for sub_key, sub_df in factor_eff.items():
+            if isinstance(sub_df, pd.DataFrame) and not sub_df.empty:
+                csv_path = os.path.join(out_dir, f'zt_factor_eff_{sub_key}_{ref_date_str}.csv')
+                sub_df.to_csv(csv_path, index=False, encoding='utf-8-sig')
+                csv_count += 1
+
+    if csv_count > 0:
+        print(f'[export_results] ✅ 已导出 {csv_count} 个 CSV 文件到: {out_dir}')
+    else:
+        print('[export_results] ⚠️ 无可导出的数据')
+
+
+print('✅ export_results() 已定义')
+
+
 # ---
-# 
+#
 # ## 14. 运行分析
-# 
+#
 # ### 方式 A: 使用自己的数据文件
-# 
+#
 # 将文件上传到 JoinQuant Research 环境，然后修改下方路径运行。
 
 # In[16]:
@@ -2796,6 +3160,9 @@ print('✅ run_analysis() 已定义')
 # ============================================================
 results = run_analysis(file_path='Table_1429.csv')
 
+# 导出结果到文件
+export_results(results)
+
 # 访问结果:
 # results['strong_df']    → 强势股列表
 # results['scored_df']    → 评分排序表
@@ -2803,139 +3170,6 @@ results = run_analysis(file_path='Table_1429.csv')
 # results['corr_df']      → 因子相关性表
 
 print('请取消注释上方代码并修改文件路径后运行')
-
-
-# ### 方式 B: 使用内嵌演示数据运行
-
-# In[3]:
-
-
-# ============================================================
-# 演示模式：使用内嵌模拟数据
-# ============================================================
-
-demo_data = {
-    '代码': ['000001', '600036', '000858', '002475', '300750',
-             '601318', '000333', '600519', '002714', '300059'],
-    '名称': ['平安银行', '招商银行', '五粮液', '立讯精密', '宁德时代',
-             '中国平安', '美的集团', '贵州茅台', '牧原股份', '东方财富'],
-    '自选时间': pd.date_range('2026-04-22', periods=10, freq='D'),
-    '自选价格': [12.5, 35.2, 158.0, 33.8, 215.0, 48.5, 62.3, 1750.0, 42.8, 18.5],
-    '自选收益': [2.5, -1.2, 3.8, -0.5, 5.2, 1.8, -2.1, 0.8, -3.5, 4.1],
-    '连涨天数': [1, 2, 1, 1, 3, 1, 1, 1, 1, 2],
-    '昨日涨幅%': [10.0, 10.0, 10.0, 9.9, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0],
-    '最新': [12.8, 34.8, 162.0, 33.5, 225.0, 49.2, 61.0, 1760.0, 41.5, 19.2],
-    '涨幅%': [2.4, -1.1, 2.5, -0.9, 4.7, 1.4, -2.1, 0.6, -3.0, 3.8],
-    '涨跌': [0.3, -0.4, 4.0, -0.3, 10.0, 0.7, -1.3, 10.0, -1.3, 0.7],
-    '最高': [13.0, 35.5, 163.0, 34.2, 228.0, 49.8, 62.5, 1765.0, 43.5, 19.5],
-    '最低': [12.3, 34.5, 157.0, 33.0, 218.0, 48.0, 60.5, 1745.0, 41.0, 18.0],
-    '开盘': [12.5, 35.0, 159.0, 33.6, 220.0, 48.5, 62.0, 1752.0, 42.5, 18.8],
-    '昨收': [12.5, 35.2, 158.0, 33.8, 215.0, 48.5, 62.3, 1750.0, 42.8, 18.5],
-    '振幅%': [5.6, 2.8, 3.8, 3.6, 4.7, 3.7, 3.2, 1.1, 5.8, 8.1],
-    '均价': [12.65, 35.0, 160.0, 33.6, 222.0, 48.8, 61.5, 1755.0, 42.0, 18.9],
-    '总量': [5e6, 3e6, 2e6, 4e6, 1.5e6, 3.5e6, 2.5e6, 8e5, 1.8e6, 6e6],
-    '现量': [1e5, 8e4, 5e4, 9e4, 4e4, 7e4, 6e4, 2e4, 4.5e4, 1.2e5],
-    '金额': [6.325e7, 1.05e8, 3.2e8, 1.344e8, 3.33e8, 1.708e8, 1.5375e8, 1.404e9, 7.56e7, 1.134e8],
-    '量比': [1.2, 0.8, 1.5, 1.1, 2.0, 0.9, 1.3, 0.7, 1.8, 2.5],
-    '换手%': [3.2, 1.5, 4.8, 5.5, 6.2, 2.1, 3.8, 0.6, 7.5, 8.2],
-    '内盘': [2.2e6, 1.6e6, 9e5, 2.1e6, 6.5e5, 1.8e6, 1.35e6, 4.2e5, 9.5e5, 2.8e6],
-    '外盘': [2.8e6, 1.4e6, 1.1e6, 1.9e6, 8.5e5, 1.7e6, 1.15e6, 3.8e5, 8.5e5, 3.2e6],
-    '内外比': [0.79, 1.14, 0.82, 1.11, 0.76, 1.06, 1.17, 1.11, 1.12, 0.88],
-    '3日涨幅%': [8.5, -2.3, 12.0, -1.5, 15.0, 5.2, -3.8, 2.5, -5.0, 10.5],
-    '6日涨幅%': [12.0, -1.0, 18.0, 3.0, 22.0, 8.0, -1.0, 5.0, -2.0, 15.0],
-    '5日涨幅%': [10.0, -1.5, 15.0, 1.0, 18.0, 6.5, -2.0, 3.5, -3.5, 12.0],
-    '本月涨幅%': [15.0, 3.0, 20.0, 5.0, 25.0, 10.0, 0.0, 8.0, -5.0, 18.0],
-    '今年涨幅%': [25.0, 8.0, 30.0, 12.0, 35.0, 15.0, 5.0, 12.0, -10.0, 28.0],
-    '近一月涨幅%': [18.0, 2.0, 22.0, 8.0, 28.0, 12.0, -2.0, 10.0, -8.0, 20.0],
-    '近一年涨幅%': [35.0, 15.0, 45.0, 20.0, 50.0, 25.0, 10.0, 20.0, -15.0, 40.0],
-    '3日换手%': [9.5, 4.2, 14.0, 16.0, 18.0, 6.0, 11.0, 1.8, 22.0, 24.0],
-    '6日换手%': [18.0, 8.5, 25.0, 28.0, 32.0, 12.0, 20.0, 3.5, 38.0, 42.0],
-    '5日换手率%': [15.0, 7.0, 22.0, 24.0, 28.0, 10.0, 18.0, 3.0, 33.0, 36.0],
-    '10日换手率%': [28.0, 14.0, 40.0, 45.0, 50.0, 20.0, 32.0, 6.0, 55.0, 60.0],
-    '主力净流入': [5e7, -2e7, 8e7, -1e7, 1.2e8, 3e7, -5e7, 2e7, -8e7, 1e8],
-    '主力净比': [5.2, -3.1, 8.5, -2.0, 12.0, 3.5, -5.8, 2.5, -8.5, 10.5],
-    '3日主力净流入': [1.5e8, -5e7, 2.2e8, -3e7, 3.5e8, 1e8, -1.2e8, 8e7, -2e8, 3e8],
-    '市盈率': [6.5, 8.2, 28.0, 35.0, 55.0, 10.0, 15.0, 35.0, -5.0, 40.0],
-    '市盈率(动)': [6.8, 8.5, 30.0, 38.0, 60.0, 10.5, 16.0, 38.0, -8.0, 45.0],
-    '市盈率(TTM)': [6.2, 7.8, 25.0, 32.0, 50.0, 9.5, 14.0, 32.0, -3.0, 38.0],
-    '市净率': [0.8, 1.2, 8.0, 5.5, 12.0, 1.5, 4.0, 10.0, 3.5, 6.0],
-    '市销率': [2.5, 3.0, 8.5, 3.5, 5.0, 1.8, 2.0, 15.0, 2.5, 12.0],
-    '股息率TTM%': [5.2, 3.8, 2.5, 0.8, 0.3, 4.5, 3.0, 1.5, 0.0, 0.5],
-    '总股本': [1.94e10, 2.52e10, 3.88e9, 7.1e9, 2.43e9, 1.83e10, 6.97e9, 1.26e9, 5.47e9, 1.32e10],
-    '总市值': [2.4e11, 8.8e11, 6.1e11, 2.4e11, 5.2e11, 8.9e11, 4.3e11, 2.2e12, 2.3e11, 2.4e11],
-    '流通股本': [1.94e10, 2.52e10, 3.88e9, 7.1e9, 2.17e9, 1.09e10, 6.97e9, 1.26e9, 3.28e9, 1.05e10],
-    '流通市值': [2.4e11, 8.8e11, 6.1e11, 2.4e11, 4.7e11, 5.3e11, 4.3e11, 2.2e12, 1.4e11, 1.9e11],
-    '人均持股数': [15000, 25000, 8000, 12000, 5000, 20000, 10000, 3000, 7000, 8000],
-    '每股收益': [1.92, 4.28, 6.32, 1.06, 4.30, 5.11, 4.45, 54.69, -8.56, 0.49],
-    'ROE': [12.5, 15.8, 25.0, 18.0, 22.0, 14.0, 25.0, 30.0, -15.0, 12.0],
-    'ROA': [1.0, 1.2, 15.0, 8.0, 10.0, 1.5, 12.0, 20.0, -8.0, 5.0],
-    '营业收入同比%': [10.0, 8.0, 15.0, 25.0, 30.0, 5.0, 10.0, 12.0, -20.0, 35.0],
-    '净利润同比%': [15.0, 12.0, 20.0, 30.0, 40.0, 8.0, 12.0, 15.0, -50.0, 45.0],
-    '扣非净利润同比%': [12.0, 10.0, 18.0, 28.0, 35.0, 6.0, 10.0, 13.0, -55.0, 40.0],
-    '销售毛利率%': [45.0, 50.0, 75.0, 18.0, 25.0, 35.0, 28.0, 90.0, 15.0, 60.0],
-    '资产负债率': [92.0, 90.0, 30.0, 55.0, 60.0, 88.0, 65.0, 25.0, 70.0, 75.0],
-    '首次涨停时间': ['09:35', '10:15', '09:32', '14:30', '09:31', '10:00', '13:30', '09:45', '14:50', '09:33'],
-    '最终涨停时间': ['09:35', '10:15', '09:32', '14:55', '09:31', '10:00', '13:30', '09:45', '14:50', '09:33'],
-    '封单额': [5e8, 3e8, 8e8, 1e8, 1.2e9, 4e8, 2e8, 2e9, 5e7, 6e8],
-    '封单量': [4e7, 8.5e6, 5e6, 3e6, 5.6e6, 8.2e6, 3.2e6, 1.1e6, 1.2e6, 3.2e7],
-    '封成比%': [8.0, 2.8, 2.5, 0.8, 3.7, 2.3, 1.3, 1.4, 0.7, 5.3],
-    '封流比%': [20.0, 10.0, 25.0, 5.0, 30.0, 15.0, 8.0, 35.0, 3.0, 22.0],
-    '涨停开板次数': [0, 0, 0, 2, 0, 0, 1, 0, 3, 0],
-    '今年累计涨停天数': [5, 3, 8, 4, 12, 2, 3, 1, 6, 10],
-    '所属行业': ['银行', '银行', '白酒', '电子', '新能源', '保险', '家电', '白酒', '农业', '券商'],
-    '几天几板': ['1天1板', '2天2板', '1天1板', '1天1板', '3天3板', '1天1板', '1天1板', '1天1板', '1天1板', '2天2板'],
-    '竞价涨幅%': [2.0, -1.0, 3.0, 0.5, 5.0, 1.5, -0.5, 0.8, -2.0, 3.5],
-    '竞价换手率%': [0.3, 0.1, 0.2, 0.4, 0.5, 0.2, 0.3, 0.05, 0.6, 0.8],
-    '竞价实际换手率%': [0.35, 0.12, 0.25, 0.45, 0.55, 0.22, 0.35, 0.06, 0.65, 0.85],
-    '竞价量': [5e5, 3e5, 2e5, 4e5, 1.5e5, 3.5e5, 2.5e5, 8e4, 1.8e5, 6e5],
-    '竞价金额': [6.3e6, 1.05e7, 3.2e7, 1.34e7, 3.33e7, 1.71e7, 1.54e7, 1.4e8, 7.56e6, 1.13e7],
-    '未匹配量': [1e5, -5e4, 2e5, -3e4, 3e5, 1e5, -8e4, 5e4, -1.5e5, 2.5e5],
-    '未匹配金额': [1.26e6, -1.75e6, 3.2e7, -1.01e6, 6.66e7, 4.9e6, -4.92e6, 8.75e6, -6.3e6, 4.63e6],
-}
-
-demo_df = pd.DataFrame(demo_data)
-print(f'演示数据已创建，共 {len(demo_df)} 只股票, {len(demo_df.columns)} 个字段')
-
-
-# In[4]:
-
-
-# 使用演示数据运行完整分析流程
-raw_df = demo_df
-cleaned_df = clean_data(raw_df, filter_st=False, filter_yizhi=False)
-
-if len(cleaned_df) > 0:
-    supplemented_df = supplement_jq_data(cleaned_df)
-    price_df = get_price_data(supplemented_df)
-    factor_df = calc_factors(price_df)
-    n_day_df = analyze_N_day(factor_df)
-    classified_df, strong_df, neutral_df, weak_df = classify_stock(factor_df)
-    scored_df = score_stock(classified_df)
-    corr_df = correlation_analysis(scored_df)
-    factor_eff = factor_effectiveness_analysis(scored_df)
-    predict_df = predict_next_day(scored_df)
-    output_results(cleaned_df, n_day_df, strong_df, neutral_df, weak_df,
-                   scored_df, corr_df, predict_df, factor_eff)
-
-
-# ---
-# 
-# ## 附录：JQ API 字段替代说明
-# 
-# | 需补充指标 | JQ API | 替代方案（如不可用） |
-# |---|---|---|
-# | T+N 收盘价 | `get_price()` | 使用文件中'最新'字段近似 |
-# | MA5/MA10 | `get_price()` + `mean()` | 使用近5/10日'均价'近似 |
-# | 5日均线乖离率 | `(close-MA5)/MA5` | 使用'3日涨幅%'近似趋势 |
-# | N日最大回撤 | `get_price()` low | 使用'振幅%'近似 |
-# | N日最大涨幅 | `get_price()` high | 使用'涨幅%'近似 |
-# | 连续上涨判断 | 逐日比较 | 使用'连涨天数'字段 |
-# | 主力净流入 | `get_money_flow()` | 使用文件字段'主力净流入' |
-# 
-# > ⚠️ 本程序仅供研究参考，不构成投资建议。
-
-# In[ ]:
-
 
 
 
