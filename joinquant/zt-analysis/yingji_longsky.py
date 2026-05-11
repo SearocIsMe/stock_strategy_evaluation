@@ -32,7 +32,8 @@ CONFIG = {
         'max_stock_num': 3,           # 最大持仓数量
         'fenlei': 'eagles-0',         # 策略分类标签（写入 trade.fenlei）
         'min_shares': 100,            # 最小买入股数
-        'cash_ratio_min': 0.3,        # 最低现金比例要求（低于此值不买入）
+        'cash_ratio_min': 0.3,        # 最低现金比例要求（一进二策略，低于此值不买入）
+        'intraday_cash_ratio_min': 0.05,  # 分时策略最低现金比例（首板低开/弱转强，更宽松）
     },
 
     # ------ 定时任务时间 ------
@@ -53,7 +54,7 @@ CONFIG = {
         'money_min': 5.5e8,                 # 最低成交金额
         'money_max': 20e8,                  # 最高成交金额
         'market_cap_min': 5,               # 最低总市值（亿）
-        'circulating_market_cap_max': 100,  # 最高流通市值（亿）
+        'circulating_market_cap_max': 75,  # 最高流通市值（亿）
         'auction_vol_ratio_min': 0.03,      # 集合竞价成交量/昨日成交量 最低比例
         'current_ratio_min': 1.0,           # 开盘价/昨日涨停价 下限
         'current_ratio_max': 1.06,          # 开盘价/昨日涨停价 上限
@@ -76,8 +77,8 @@ CONFIG = {
         'avg_price_increase_min': -0.04,    # 均价增长最低要求
         'money_min': 3e8,                   # 最低成交金额
         'money_max': 19e8,                  # 最高成交金额
-        'market_cap_min': 300,               # 最低总市值（亿）
-        'circulating_market_cap_max': 30000,  # 最高流通市值（亿）
+        'market_cap_min': 75,               # 最低总市值（亿）
+        'circulating_market_cap_max': 3000,  # 最高流通市值（亿）
         'auction_vol_ratio_min': 0.03,      # 集合竞价成交量/昨日成交量 最低比例
         'current_ratio_min': 0.98,          # 开盘价/昨日涨停价 下限
         'current_ratio_max': 1.09,          # 开盘价/昨日涨停价 上限
@@ -102,7 +103,8 @@ CONFIG = {
         'macd_slow': 26,                    # MACD慢线周期
         'macd_signal': 9,                   # MACD信号线周期
         'require_kdj_cross': True,          # 是否要求KDJ金叉
-        'require_macd_cross': True,         # 是否要求MACD金叉
+        'require_macd_cross': False,        # 是否要求MACD金叉（False=仅KDJ金叉即可，KDJ+MACD同时金叉过于严格）
+        'kdj_cross_min_k': 20,             # KDJ金叉时K值最低要求（低于此值为超卖弱势，非真正反转）
         'min_15m_bars': 35,                 # 最少15分钟K线数量（MACD需要26+9）
     },
 
@@ -132,7 +134,7 @@ CONFIG = {
 
     # ------ 风险控制参数 ------
     'risk_control': {
-        'enabled': False,  # 风险控制总开关（False时所有风控措施均不生效）
+        'enabled': True,  # 风险控制总开关（True时所有风控措施生效）
 
         # ====== 核心风控（对回撤影响最大）======
 
@@ -188,9 +190,6 @@ CONFIG = {
     },
 }
 
-# ⭐ 设置策略分类标签
-#newqmt_sql.FENLEI = CONFIG['global']['fenlei']
-
 
 # ================================================
 # 策略初始化
@@ -226,6 +225,7 @@ def initialize(context):
     g.portfolio_peak = 0            # 组合历史最高价值（用于回撤熔断）
     g.equity_history = []           # 每日净值历史（用于权益曲线过滤）
     g.portfolio_drawdown_triggered = False  # 组合回撤熔断是否触发
+    g.portfolio_drawdown_trigger_day = None  # 组合回撤熔断触发日期（用于冷却期计算）
 
     # 分时买入追踪变量
     g.qualified_gap_down = []       # 首板低开合格股票列表（9:30筛选，9:35-9:55分时买入）
@@ -246,6 +246,8 @@ def _log_config():
     log.info("策略配置:")
     log.info(f"  最大持仓: {CONFIG['global']['max_stock_num']}")
     log.info(f"  分类标签: {CONFIG['global']['fenlei']}")
+    log.info(f"  一进二现金比例>={CONFIG['global']['cash_ratio_min']:.0%}, "
+             f"分时策略现金比例>={CONFIG['global']['intraday_cash_ratio_min']:.0%}")
     log.info(f"  一进二: 均价增长>={CONFIG['gap_up']['avg_price_increase_min']:.0%}, "
              f"金额{CONFIG['gap_up']['money_min']/1e8:.1f}-{CONFIG['gap_up']['money_max']/1e8:.0f}亿, "
              f"市值>={CONFIG['gap_up']['market_cap_min']}亿, "
@@ -263,7 +265,8 @@ def _log_config():
              f"MACD({CONFIG['reversal_buy']['macd_fast']},{CONFIG['reversal_buy']['macd_slow']},"
              f"{CONFIG['reversal_buy']['macd_signal']}), "
              f"要求KDJ金叉={CONFIG['reversal_buy']['require_kdj_cross']}, "
-             f"要求MACD金叉={CONFIG['reversal_buy']['require_macd_cross']}")
+             f"要求MACD金叉={CONFIG['reversal_buy']['require_macd_cross']}, "
+             f"KDJ金叉K值>={CONFIG['reversal_buy']['kdj_cross_min_k']}")
 
     rc = CONFIG['risk_control']
     if rc['enabled']:
@@ -396,6 +399,7 @@ def _check_portfolio_drawdown(context):
     if drawdown >= rc['portfolio_drawdown_threshold']:
         if not g.portfolio_drawdown_triggered:  # 避免重复触发
             g.portfolio_drawdown_triggered = True
+            g.portfolio_drawdown_trigger_day = context.current_dt.date()  # 记录触发日期
             log.warning(f"触发组合回撤熔断: 回撤={drawdown:.2%}, 阈值={rc['portfolio_drawdown_threshold']:.2%}, "
                         f"峰值={g.portfolio_peak:.0f}, 当前={current_value:.0f}")
             # 减仓: 对所有可卖持仓按比例减仓
@@ -405,7 +409,18 @@ def _check_portfolio_drawdown(context):
                     target_value = pos.value * (1 - rc['portfolio_drawdown_reduce_ratio'])
                     order_target_value(s, target_value)
                     log.info(f"组合回撤减仓: {s} 减仓{rc['portfolio_drawdown_reduce_ratio']:.0%}")
+            # 重置峰值: 熔断已执行减仓，以当前净值为新基准，避免死亡螺旋
+            # （否则策略永远无法恢复，因为不交易则净值永远无法回到旧峰值）
+            g.portfolio_peak = current_value
+            log.info(f"组合回撤熔断: 重置峰值至当前净值 {current_value:.0f}")
     else:
+        # 冷却期: 熔断触发后至少等待5个交易日再恢复，避免在暴跌中过早重新入场
+        cooling_days = 5
+        if g.portfolio_drawdown_triggered and hasattr(g, 'portfolio_drawdown_trigger_day'):
+            days_since_trigger = (context.current_dt.date() - g.portfolio_drawdown_trigger_day).days
+            if days_since_trigger < cooling_days:
+                log.info(f"组合回撤冷却中: 已过{days_since_trigger}天, 需{cooling_days}天")
+                return  # 仍在冷却期，不恢复
         if g.portfolio_drawdown_triggered:
             log.info(f"组合回撤恢复: 回撤={drawdown:.2%} < 阈值{rc['portfolio_drawdown_threshold']:.2%}")
         g.portfolio_drawdown_triggered = False
@@ -695,6 +710,10 @@ def buy(context):
     g.qualified_reversal = _check_sector_concentration(rzq_stocks, context)
 
     # ====== 执行一进二买入（9:30 立即执行）======
+    # 熊市跳过一进二：一进二是最激进的追涨策略，在空头市场中胜率极低
+    if rc['enabled'] and rc['market_filter_enabled'] and not g.market_bullish:
+        log.info("[一进二] 熊市环境，跳过一进二买入")
+        gk_stocks = []
     bought = _execute_buy(gk_stocks, '一进二', context, current_data)
 
     log.info(f"一进二买入 {len(bought)} 只, 首板低开待买入 {len(g.qualified_gap_down)} 只, "
@@ -724,12 +743,17 @@ def _execute_buy(stocks, strategy_name, context, current_data, price_dict=None):
 
     rc = CONFIG['risk_control']
     max_stock_num = CONFIG['global']['max_stock_num']
-    cash_ratio_min = CONFIG['global']['cash_ratio_min']
     min_shares = CONFIG['global']['min_shares']
 
+    # 根据策略类型选择不同的现金比例要求
+    # 一进二使用较严格的现金比例，分时策略使用较宽松的现金比例
+    is_intraday = strategy_name in ('首板低开', '弱转强')
+    cash_ratio_min = CONFIG['global']['intraday_cash_ratio_min'] if is_intraday else CONFIG['global']['cash_ratio_min']
+
     # 检查可用现金比例
-    if context.portfolio.available_cash / context.portfolio.total_value <= cash_ratio_min:
-        log.info(f"[{strategy_name}] 可用现金比例不足 {cash_ratio_min:.0%}，不买入")
+    cash_ratio = context.portfolio.available_cash / context.portfolio.total_value
+    if cash_ratio <= cash_ratio_min:
+        log.info(f"[{strategy_name}] 可用现金比例 {cash_ratio:.1%} 不足 {cash_ratio_min:.0%}，不买入")
         return []
 
     # 获取当前持仓数量
@@ -745,7 +769,7 @@ def _execute_buy(stocks, strategy_name, context, current_data, price_dict=None):
     # 限制只买入前 can_buy_count 只股票
     stocks = stocks[:can_buy_count]
 
-    # 计算每只股票的买入金额，平均分配可用资金
+    # 计算每只股票的买入金额：所有策略均使用全部可用现金
     value = context.portfolio.available_cash / len(stocks)
 
     # 熊市减仓: 如果市场环境为空头，按比例缩减买入金额
@@ -977,9 +1001,14 @@ def _check_golden_cross(stock, context):
                                smooth_k=rvb['kdj_smooth_k'],
                                smooth_d=rvb['kdj_smooth_d'])
             # 检查最近2根K线是否出现金叉：前一根K<=D，当前一根K>D
+            # 同时要求K值不低于kdj_cross_min_k，过滤超卖弱势假信号
+            min_k = rvb.get('kdj_cross_min_k', 0)
             if len(K) >= 2 and K[-2] <= D[-2] and K[-1] > D[-1]:
-                kdj_cross = True
-                log.info(f"[弱转强-金叉] {stock} KDJ金叉: K={K[-1]:.2f}, D={D[-1]:.2f}, J={J[-1]:.2f}")
+                if K[-1] >= min_k:
+                    kdj_cross = True
+                    log.info(f"[弱转强-金叉] {stock} KDJ金叉: K={K[-1]:.2f}, D={D[-1]:.2f}, J={J[-1]:.2f}")
+                else:
+                    log.info(f"[弱转强-金叉] {stock} KDJ金叉但K值过低: K={K[-1]:.2f} < {min_k}，跳过")
 
         # 检查MACD金叉
         if require_macd:
@@ -1333,7 +1362,13 @@ def sell_heavy_turnover(context):
         df = get_price(s, end_date=date, fields=['high', 'low', 'close', 'open', 'volume', 'high_limit'], count=2, fill_paused=False, skip_paused=False, panel=False)
         pullback_ratio = (df['close'][-1] - df['high'][-1]) / df['high'][-1]  # 回调比例
         vol_ratio = df['volume'][-1] / df['volume'][-2]  # 成交量比例
-        close_pos = (df['close'][-1] - min(df['high'][-1], df['low'][-1])) / abs(df['high'][-1] - df['low'][-1])  # 收盘位置
+        # 收盘位置：close在当日振幅中的相对位置（0=最低，1=最高）
+        day_range = abs(df['high'][-1] - df['low'][-1])
+        if day_range > 0:
+            close_pos = (df['close'][-1] - min(df['high'][-1], df['low'][-1])) / day_range
+        else:
+            # 涨停/跌停时high==low，close在最高位，设为1.0（不会触发高位放量卖出）
+            close_pos = 1.0
 
         # 如果处于高位，成交量放大，回调位置低于阈值，当天在跌, 则卖出
         if ((context.portfolio.positions[s].closeable_amount != 0) and (vol_ratio >= sl['heavy_turnover_vol_ratio_min']) and (close_pos <= sl['heavy_turnover_close_pos_max']) and (current_data[s].last_price < df['close'][-1])):
