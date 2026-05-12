@@ -22,8 +22,7 @@ from datetime import timedelta
 
 import newqmt_sql
 
-# ⭐ 在这里设置这个策略的分类标签（写入 trade.fenlei）
-newqmt_sql.FENLEI = 'eagles-75-300-3000-test'      
+newqmt_sql.FENLEI = 'eagles-5-75-2000'      
 
 from newqmt_sql import (
     order_zzy as order,
@@ -83,8 +82,8 @@ CONFIG = {
         'avg_price_increase_min': -0.04,    # 均价增长最低要求
         'money_min': 3e8,                   # 最低成交金额
         'money_max': 19e8,                  # 最高成交金额
-        'market_cap_min': 300,               # 最低总市值（亿）
-        'circulating_market_cap_max': 3000,  # 最高流通市值（亿）
+        'market_cap_min': 75,               # 最低总市值（亿）
+        'circulating_market_cap_max': 2000,  # 最高流通市值（亿）
         'auction_vol_ratio_min': 0.03,      # 集合竞价成交量/昨日成交量 最低比例
         'current_ratio_min': 0.98,          # 开盘价/昨日涨停价 下限
         'current_ratio_max': 1.09,          # 开盘价/昨日涨停价 上限
@@ -234,7 +233,6 @@ def _log_config():
     log.info("=" * 50)
     log.info("策略配置:")
     log.info(f"  最大持仓: {CONFIG['global']['max_stock_num']}")
-    log.info(f"  分类标签: {CONFIG['global']['fenlei']}")
     log.info(f"  一进二: 均价增长>={CONFIG['gap_up']['avg_price_increase_min']:.0%}, "
              f"金额{CONFIG['gap_up']['money_min']/1e8:.1f}-{CONFIG['gap_up']['money_max']/1e8:.0f}亿, "
              f"市值>={CONFIG['gap_up']['market_cap_min']}亿, "
