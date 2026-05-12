@@ -21,6 +21,7 @@ def initialize(context):
     log.set_level('system', 'error')
     set_option("match_by_signal", True) # # 强制撮合，仅支持限价单。使用限价单进行委托时将不对委托价格和成交数量进行任何检查而直接成交
     g.stock_num = 2
+    g.base_stock_num = 2  # 基础最大持仓数，根据市场环境动态调整
     g.push = False
     g.day_round = 0
     g.youxian=[]
@@ -28,80 +29,82 @@ def initialize(context):
     g.all_remove=[]
     g.sotck_data_hongpanlv=dict()
     g.sotck_data_yijialv=dict()
-    
-    # Redis连接配置（使用您提供的凭证）
+    g.max_hold_days = 5  # 最大持仓天数
+    # 持仓信息字典：{stock_code: {'buy_date': date, 'zt_price': float}}
+    # buy_date: 买入日期，用于计算持仓天数
+    # zt_price: 买入当天的涨停价，作为止损线
+    g.position_info = dict()
    
     log.info(g.push)
-    #set_option('avoid_future_data', True)
-    g.WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/15c8e896-5cb4-40a4-ba69-b2a36d4d4cdf"
-    g.WEBHOOK_SECRET = "IG3VNZ51o81qYbiTZqZX5N9f"
-# 创建Redis连接
-def create_redis_connection(REDIS_CONFIG):
-    return redis.Redis(**REDIS_CONFIG)
+    set_option('avoid_future_data', True)
 
 def handle_tick(context, tick):
     current_data = get_current_data()
-    if  (g.stock_num-len(context.portfolio.positions))==0:
-        return
     time_now = context.current_dt.strftime('%H:%M:%S')
-    if time_now>='10:30:00' or time_now<'09:30:00':
+    
+    # === 实时止损：跌破买入当天涨停价且跌破10日均线则卖出 ===
+    for s in list(context.portfolio.positions):
+        pos = context.portfolio.positions[s]
+        if pos.closeable_amount == 0:
+            continue
+        if s in g.position_info:
+            zt_price = g.position_info[s]['zt_price']
+            # 跌破涨停价，且跌破10日均线，才止损；未跌破MA10则继续持有
+            if current_data[s].last_price < zt_price:
+                ma10 = g.ma10_data.get(s, None)
+                if ma10 is None or current_data[s].last_price < ma10:
+                    order_target_value(s, 0)
+                    profit_rate = current_data[s].last_price / pos.avg_cost - 1
+                    log.info("跌破涨停价且跌破MA10止损卖出%s, 涨停价:%.2f, MA10:%.2f, 现价:%.2f, 盈亏:%.2f%%",
+                             current_data[s].name, zt_price, ma10 or 0, current_data[s].last_price, profit_rate*100)
+                    del g.position_info[s]
+                    continue
+    
+    # 持仓已满则不再买入
+    if (g.stock_num - len(context.portfolio.positions)) == 0:
+        return
+    # 交易窗口：09:30 - 11:00
+    if time_now >= '11:00:00' or time_now < '09:30:00':
         return
     if tick.code in g.today_tick or tick.code in g.remove_list:
         return
-    if tick.current <g.stock_data[tick.code]/1.1:
+    # 跌破昨收价（涨幅为负）则排除
+    if tick.current < g.stock_data[tick.code] / 1.1:
         g.remove_list.append(tick.code)
-    if  tick.current>= g.stock_data[tick.code]-0.05 and  tick.current>= current_data[tick.code].day_open and tick.code not in list(context.portfolio.positions) :
-        value = context.portfolio.available_cash / (g.stock_num-len(context.portfolio.positions))
+        return
+    # 买入条件：价格接近涨停价（距涨停价0.05元内）且不低于开盘价
+    if tick.current >= g.stock_data[tick.code] - 0.05 and tick.current >= current_data[tick.code].day_open and tick.code not in list(context.portfolio.positions):
+        value = context.portfolio.available_cash / (g.stock_num - len(context.portfolio.positions))
         if value > 100:
-            order_value(tick.code,value)
-            #publisher(tick.code,g.stock_data[tick.code],100)
+            order_value(tick.code, value)
             g.today_tick[tick.code] = 1
-            print("买入"+get_current_data()[tick.code].name)
+            # 记录买入信息：买入日期和当天涨停价
+            g.position_info[tick.code] = {
+                'buy_date': context.current_dt.date(),
+                'zt_price': g.stock_data[tick.code]  # 买入当天的涨停价作为止损线
+            }
+            log.info("买入%s, 价格:%.2f, 涨停价止损线:%.2f", current_data[tick.code].name, tick.current, g.stock_data[tick.code])
     
-''' ====================== 发布者代码 ====================== '''
-def publisher(c,p,a):
-    pub = g.redis_client
-    CHANNEL_NAME="trading_data"
-    
-    print("[发布者] 已连接到Redis，开始发送数据...")
-    
-    # 模拟发布3条交易数据
-    data = {
-            'code': c,
-            'price': p,
-            'amount': a
-        }
-        
-        # 发布JSON格式的消息
-    pub.publish(CHANNEL_NAME, json.dumps(data))
-    print("[发布者] 数据发送完成")      
         
 def after_code_changed(context):
     g.push = False
     g.day_buy=0
     
     unschedule_all() # 取消所有定时运行
-    # run_daily(get_stock_list, '9:05')
-   # run_daily(buy,  time='every_bar')
-    #昨日涨停
-   #run_daily(saixuan,  time='10:20')
-   # run_daily(saixuan,  time='09:50')
 
     run_daily(prepare,  time='09:27')
     g.target_list = []
     g.remove_list = []
     g.init_pre=1
-    #g.WEBHOOK_URL = "https://open.feishu.cn/open-apis/bot/v2/hook/14b7908e-c04e-4fec-b4e9-78f587cbcc5a"
-   # g.WEBHOOK_SECRET = "0MJBTfGQkP4exShpVpn7af"
-    run_daily(sell, time='11:25', reference_security='000300.XSHG')
+
+    # 每日14:50检查持仓：5日到期卖出 或 跌破涨停价止损
     run_daily(sell, time='14:50', reference_security='000300.XSHG')
-    #initialize(context)
+
+    
 def saixuan(context):
     now = context.current_dt
     current_data = get_current_data()
-    #zeroToday = now - datetime.timedelta(hours=now.hour, minutes=now.minute, seconds=now.second,microseconds=now.microsecond)
-   # lastToday = zeroToday + datetime.timedelta(hours=9, minutes=30, seconds=00)
-   # endToday = zeroToday + datetime.timedelta(hours=9, minutes=32, seconds=00)
+
     for s in g.yizhi:
         df_panel_all = get_price(
                         s,
@@ -118,14 +121,7 @@ def saixuan(context):
             log.info("监听%s",current_data[s].name)
             
 def prepare(context):
-    REDIS_CONFIG = {
-        'host': 'redis-11679.c292.ap-southeast-1-1.ec2.redns.redis-cloud.com',
-        'port': 11679,
-        'decode_responses': True,
-        #'username': 'default',
-        'password': 'ObL0E7RbFHLgG9MjyeXVaBPZYrzavgj5'
-    }
-   # g.redis_client=create_redis_connection(REDIS_CONFIG)
+
     unsubscribe_all()
     g.today_tick = dict()
     g.today_tick_zhaban = dict()
@@ -136,9 +132,40 @@ def prepare(context):
     g.buy_complited = False
     g.today = 0
     g.stock_data=dict()
-    #排除昨日涨停
     g.remove_list=[]
-    g.jianting=['000008.XSHE', '000066.XSHE', '000099.XSHE', '000158.XSHE', '000566.XSHE', '000595.XSHE', '000605.XSHE', '000608.XSHE', '000702.XSHE', '000712.XSHE', '000716.XSHE', '000717.XSHE', '000795.XSHE', '000801.XSHE', '000810.XSHE', '000833.XSHE', '000859.XSHE', '000880.XSHE', '000903.XSHE', '000917.XSHE', '000953.XSHE', '000981.XSHE', '001209.XSHE', '001229.XSHE', '001298.XSHE', '001379.XSHE', '001696.XSHE', '002085.XSHE', '002095.XSHE', '002103.XSHE', '002131.XSHE', '002134.XSHE', '002146.XSHE', '002178.XSHE', '002181.XSHE', '002199.XSHE', '002232.XSHE', '002277.XSHE', '002285.XSHE', '002298.XSHE', '002305.XSHE', '002347.XSHE', '002348.XSHE', '002403.XSHE', '002423.XSHE', '002455.XSHE', '002514.XSHE', '002526.XSHE', '002583.XSHE', '002593.XSHE', '002611.XSHE', '002628.XSHE', '002640.XSHE', '002654.XSHE', '002670.XSHE', '002725.XSHE', '002769.XSHE', '002820.XSHE', '002823.XSHE', '002857.XSHE', '002862.XSHE', '002869.XSHE', '003026.XSHE', '600171.XSHG', '600198.XSHG', '600207.XSHG', '600243.XSHG', '600292.XSHG', '600410.XSHG', '600439.XSHG', '600463.XSHG', '600501.XSHG', '600593.XSHG', '600619.XSHG', '600622.XSHG', '600624.XSHG', '600635.XSHG', '600650.XSHG', '600653.XSHG', '600676.XSHG', '600678.XSHG', '600793.XSHG', '600811.XSHG', '600817.XSHG', '600839.XSHG', '600841.XSHG', '600889.XSHG', '600979.XSHG', '600990.XSHG', '601727.XSHG', '601933.XSHG', '603006.XSHG', '603021.XSHG', '603038.XSHG', '603106.XSHG', '603278.XSHG', '603499.XSHG', '603533.XSHG', '603580.XSHG', '603656.XSHG', '603657.XSHG', '603662.XSHG', '603666.XSHG', '603679.XSHG', '603716.XSHG', '603739.XSHG', '603803.XSHG', '603859.XSHG', '603988.XSHG', '605180.XSHG', '605198.XSHG', '000056.XSHE', '000062.XSHE', '000066.XSHE', '000533.XSHE', '000536.XSHE', '000566.XSHE', '000573.XSHE', '000605.XSHE', '000620.XSHE', '000665.XSHE', '000677.XSHE', '000681.XSHE', '000702.XSHE', '000712.XSHE', '000716.XSHE', '000717.XSHE', '000759.XSHE', '000785.XSHE', '000795.XSHE', '000801.XSHE', '000810.XSHE', '000818.XSHE', '000833.XSHE', '000856.XSHE', '000859.XSHE', '000880.XSHE', '000903.XSHE', '000958.XSHE', '000965.XSHE', '000981.XSHE', '001209.XSHE', '001379.XSHE', '001696.XSHE', '002036.XSHE', '002065.XSHE', '002094.XSHE', '002095.XSHE', '002103.XSHE', '002122.XSHE', '002123.XSHE', '002131.XSHE', '002146.XSHE', '002164.XSHE', '002175.XSHE', '002178.XSHE', '002181.XSHE', '002184.XSHE', '002208.XSHE', '002232.XSHE', '002265.XSHE', '002276.XSHE', '002277.XSHE', '002278.XSHE', '002285.XSHE', '002290.XSHE', '002347.XSHE', '002369.XSHE', '002403.XSHE', '002423.XSHE', '002514.XSHE', '002526.XSHE', '002527.XSHE', '002570.XSHE', '002580.XSHE', '002583.XSHE', '002593.XSHE', '002611.XSHE', '002628.XSHE', '002633.XSHE', '002640.XSHE', '002654.XSHE', '002670.XSHE', '002681.XSHE', '002691.XSHE', '002725.XSHE', '002741.XSHE', '002767.XSHE', '002820.XSHE', '002823.XSHE', '002851.XSHE', '002862.XSHE', '002869.XSHE', '002881.XSHE', '002912.XSHE', '003026.XSHE', '600120.XSHG', '600126.XSHG', '600171.XSHG', '600172.XSHG', '600198.XSHG', '600203.XSHG', '600292.XSHG', '600327.XSHG', '600386.XSHG', '600410.XSHG', '600439.XSHG', '600463.XSHG', '600481.XSHG', '600501.XSHG', '600539.XSHG', '600579.XSHG', '600589.XSHG', '600592.XSHG', '600593.XSHG', '600602.XSHG', '600619.XSHG', '600622.XSHG', '600624.XSHG', '600629.XSHG', '600635.XSHG', '600650.XSHG', '600653.XSHG', '600676.XSHG', '600678.XSHG', '600679.XSHG', '600693.XSHG', '600714.XSHG', '600719.XSHG', '600743.XSHG', '600793.XSHG', '600800.XSHG', '600817.XSHG', '600824.XSHG', '600825.XSHG', '600839.XSHG', '600865.XSHG', '600881.XSHG', '600889.XSHG', '600936.XSHG', '600979.XSHG', '601086.XSHG', '601162.XSHG', '601177.XSHG', '601727.XSHG', '601933.XSHG', '603004.XSHG', '603038.XSHG', '603039.XSHG', '603063.XSHG', '603086.XSHG', '603106.XSHG', '603110.XSHG', '603278.XSHG', '603300.XSHG', '603366.XSHG', '603583.XSHG', '603586.XSHG', '603626.XSHG', '603662.XSHG', '603667.XSHG', '603677.XSHG', '603739.XSHG', '603776.XSHG', '603777.XSHG', '603803.XSHG', '603881.XSHG', '603883.XSHG', '603928.XSHG', '603949.XSHG', '603955.XSHG', '605033.XSHG', '605069.XSHG', '605100.XSHG', '605179.XSHG', '605258.XSHG', '605398.XSHG', '605488.XSHG']
+    g.jianting=[]
+    
+    # === 预计算持仓股的10日均线（用于止损判断）===
+    g.ma10_data = dict()
+    held_stocks = list(context.portfolio.positions.keys())
+    if held_stocks:
+        try:
+            for s in held_stocks:
+                if s in g.position_info:
+                    ma10_df = get_price(s, end_date=context.previous_date, frequency='daily',
+                                        fields=['close'], count=10, skip_paused=True)
+                    if len(ma10_df) >= 10:
+                        g.ma10_data[s] = ma10_df['close'].mean()
+        except:
+            pass
+    
+    # === 市场环境过滤：指数在5日均线之下时减仓操作 ===
+    g.market_weak = False
+    index_code = '000300.XSHG'  # 沪深300作为市场基准
+    index_data = get_price(index_code, end_date=context.previous_date, frequency='daily',
+                           fields=['close'], count=5, skip_paused=True)
+    if len(index_data) >= 5:
+        ma5 = index_data['close'].mean()
+        current_close = index_data['close'].iloc[-1]
+        if current_close < ma5:
+            g.market_weak = True
+            g.stock_num = max(1, g.base_stock_num - 1)  # 弱市减少持仓
+            log.info("市场弱势（沪深300收于%.2f < MA5 %.2f），最大持仓数降为%d", current_close, ma5, g.stock_num)
+        else:
+            g.stock_num = g.base_stock_num
+    else:
+        g.stock_num = g.base_stock_num
+    
     #获取今日股票
     g.yizhi = prepare_stock_list(context)
     current_data = get_current_data()
@@ -146,11 +173,8 @@ def prepare(context):
         subscribe(s, 'tick')
         g.stock_data[s]=current_data[s].high_limit
         log.info("监听%s",current_data[s].name)
-    #prepare_stock_list_not_zhangting(context)
-   # g.jianting=get_hl_not_stock(g.jianting,context.previous_date,1)
-    
-    #g.target_list =prepare_stock_list(context)
-   # log.info("今日监控股票列表%s",g.yizhi)
+     
+    log.info("今日监控股票列表%s",g.yizhi)
 
 # 每日初始股票池
 def prepare_stock_list8(context):
@@ -241,7 +265,6 @@ def buy(context):
                 print(value)
                 if value/current_data[stock].last_price>100:
                     order_value(stock, value)
-                    feishu(stock,"买入")
                     print('买入' + stock+'->'+current_data[stock].name)
            
 def jianyi(context,stock):
@@ -251,19 +274,51 @@ def jianyi(context,stock):
         return "->注意:权重高，可以多买点"
     return ""
 def sell(context):
-    stime = context.current_dt.strftime("%H%M")
+    """每日14:50检查持仓，执行5日持有期规则：
+    1. 持仓超过5天 → 卖出（无论盈亏）
+    2. 跌破买入当天涨停价且跌破10日均线 → 止损卖出
+    3. 涨停股继续持有（不卖）
+    """
     current_data = get_current_data()
-
-    # 根据时间执行不同的卖出策略
-    if stime == '1125':
-        for s in list(context.portfolio.positions):  #上午有利润就跑
-            if ((context.portfolio.positions[s].closeable_amount != 0) and (current_data[s].last_price < current_data[s].high_limit) and (current_data[s].last_price > 1*context.portfolio.positions[s].avg_cost)):#avg_cost当前持仓成本
+    today = context.current_dt.date()
+    
+    for s in list(context.portfolio.positions):
+        pos = context.portfolio.positions[s]
+        if pos.closeable_amount == 0:
+            continue
+        
+        # 涨停股继续持有
+        if current_data[s].last_price >= current_data[s].high_limit:
+            continue
+        
+        # 检查持仓信息
+        if s not in g.position_info:
+            # 没有持仓记录（可能是之前买入的），补录并卖出
+            order_target_value(s, 0)
+            log.info("无持仓记录，卖出%s", current_data[s].name)
+            continue
+        
+        buy_date = g.position_info[s]['buy_date']
+        zt_price = g.position_info[s]['zt_price']
+        hold_days = (today - buy_date).days
+        profit_rate = current_data[s].last_price / pos.avg_cost - 1
+        
+        # 持仓超过5天，卖出
+        if hold_days >= g.max_hold_days:
+            order_target_value(s, 0)
+            log.info("持有%d天到期卖出%s, 盈亏:%.2f%%", hold_days, current_data[s].name, profit_rate*100)
+            del g.position_info[s]
+            continue
+        
+        # 跌破买入当天涨停价，且跌破10日均线，才止损；未跌破MA10则继续持有
+        if current_data[s].last_price < zt_price:
+            ma10 = g.ma10_data.get(s, None)
+            if ma10 is None or current_data[s].last_price < ma10:
                 order_target_value(s, 0)
-                 
-    elif stime == '1450':
-        for s in list(context.portfolio.positions):
-            if ((context.portfolio.positions[s].closeable_amount != 0) and (current_data[s].last_price < current_data[s].high_limit)):#closeable_amount可卖出的仓位
-                order_target_value(s, 0)
+                log.info("跌破涨停价且跌破MA10止损卖出%s, 涨停价:%.2f, MA10:%.2f, 现价:%.2f, 盈亏:%.2f%%",
+                         current_data[s].name, zt_price, ma10 or 0, current_data[s].last_price, profit_rate*100)
+                del g.position_info[s]
+                continue
                 
    
 def calculate_lb(stocks,end_date,count):
@@ -346,6 +401,7 @@ def hongpanlv(context,df2_code,df):
         '''
         g.sotck_data[s]='最近200个交易日【\n涨停次数'+str(count_all)+'\n次日红盘5%次数'+str(yijia)+'\n次日红盘率'+str(round(ratio,2)*100)+'%\n'+'连板率'+str(round(lianbanlv,2)*100)+'%\n'+'次日溢价5%的概率'+str(round(yijia5,2)*100)+'%】'
 #        log.info(sotck_data)
+
  # 每日初始股票池
 def prepare_stock_list_not_zhangting(context):
     
@@ -359,28 +415,81 @@ def prepare_stock_list_not_zhangting(context):
     initial_list=get_hl_stock(initial_list,yesterday,1)
     cur = get_current_data()
     df2_code=[]
-    #initial_list = get_hl_not_stock(initial_list, yesterday,1)
+    initial_list = get_hl_not_stock(initial_list, yesterday,1)
     for s in initial_list:
         if cur[s].day_open==cur[s].high_limit:
             df2_code.append(s)
-    #g.jianting=df2_code
+    g.jianting = df2_code
     return df2_code
 
 # 每日初始股票池
 def prepare_stock_list(context):
     today = context.current_dt.date()
     yesterday = context.previous_date
+    # 获取初始股票池
     initial_list = set_stockpool(context)
     initial_list = filter_kcbj_stock(initial_list)
     initial_list = filter_st_paused_stock(initial_list, today)
     initial_list = filter_new_stock(initial_list, today)
-    initial_list=get_hl_stock(initial_list,yesterday,1)
+    # 筛选昨日涨停股（close == high_limit）
+    initial_list = get_hl_stock(initial_list, yesterday, 1)
+    
+    # === 核心过滤：只保留首板股，排除连板股 ===
+    # 策略逻辑：昨日首板 → 今日一进二 → 明日三板卖
+    # 如果前天也涨停，说明昨日是连板（二板及以上），不是首板，必须排除
+    day_before_yesterday = get_trade_days(end_date=yesterday, count=2)[0]  # 前一个交易日
+    lianban_list = get_hl_stock(initial_list, day_before_yesterday, 1)  # 前天也涨停的=连板股
+    initial_list = [s for s in initial_list if s not in lianban_list]  # 只保留首板股
+    log.info("昨日首板股数量:%d, 排除连板股数量:%d", len(initial_list), len(lianban_list))
+    
+    # === 排除昨日一字板股（开盘即涨停，次日追买风险大）===
+    if initial_list:
+        yiziban_df = get_price(initial_list, end_date=yesterday, frequency='daily',
+                               fields=['open', 'high_limit'], count=1, panel=False, fill_paused=False, skip_paused=True)
+        yiziban_list = yiziban_df[yiziban_df['open'] == yiziban_df['high_limit']]['code'].tolist()
+        initial_list = [s for s in initial_list if s not in yiziban_list]
+        log.info("排除昨日一字板股数量:%d, 剩余首板股数量:%d", len(yiziban_list), len(initial_list))
+    
+    # === 排除5日内涨幅超过23%的股票（短期涨幅过大，追高风险大）===
+    if initial_list:
+        gain_df = get_price(initial_list, end_date=yesterday, frequency='daily',
+                            fields=['close'], count=5, panel=False, fill_paused=False, skip_paused=True)
+        # 计算每只股票5日涨幅
+        gain_list = []
+        for s in initial_list:
+            stock_df = gain_df[gain_df['code'] == s]
+            if len(stock_df) >= 2:
+                gain_rate = (stock_df['close'].iloc[-1] / stock_df['close'].iloc[0]) - 1
+                if gain_rate > 0.23:
+                    gain_list.append(s)
+        initial_list = [s for s in initial_list if s not in gain_list]
+        log.info("排除5日涨幅超23%%股数量:%d, 剩余首板股数量:%d", len(gain_list), len(initial_list))
+    
+    # 从首板股中，筛选今日高开但未一字涨停的股票
+    # 条件1：开盘价 > 昨收*1.05（高开5%以上）
+    # 条件2：开盘价 < 涨停价（未一字板）
+    # 条件3：开盘价 < 涨停价*0.98（排除开盘价太接近涨停价的，追高风险大）
+    # 条件4：昨日换手率 > 2%（排除流动性差的股票）
     cur = get_current_data()
-    hl_list=[]
-   # hl_list = get_hl_stock_dangtian(initial_list,today)     # 昨日涨停
+    hl_list = []
     for s in initial_list:
-        if cur[s].day_open > cur[s].high_limit/1.1*1.08 and cur[s].day_open<cur[s].high_limit:
+        pre_close = cur[s].high_limit / 1.1  # 昨收价
+        day_open = cur[s].day_open
+        # 高开5%以上且未一字涨停
+        if day_open > pre_close * 1.05 and day_open < cur[s].high_limit:
+            # 排除开盘价太接近涨停价的（距涨停不到2%，追高风险大）
+            if day_open > cur[s].high_limit * 0.98:
+                continue
             hl_list.append(s)
+    # 换手率过滤：排除昨日换手率过低的股票
+    if hl_list:
+        try:
+            turnover_data = get_valuation(hl_list, end_date=yesterday, start_date=yesterday,
+                                          fields=['turnover_ratio'])
+            low_turnover = turnover_data[turnover_data['turnover_ratio'] < 2.0].index.tolist()
+            hl_list = [s for s in hl_list if s not in low_turnover]
+        except:
+            pass  # 如果获取换手率失败，不过滤
     return hl_list
 
 def get_hl_stock_dangtian(stock_list,d):
@@ -422,30 +531,8 @@ def filter_st_paused_stock(initial_list, date):
             current_data[stock].is_st or
             current_data[stock].paused or
             '退' in current_data[stock].name)]
-    
-def feishu_msg(stock,buy,msg):
-    if g.push==False:
-        return
-    current_data = get_current_data()
-    params = {
-        "timestamp": int(time.time()),
-        "sign": gen_sign(g.WEBHOOK_SECRET),
-        "msg_type": "text",
-        "content": {"text": msg+buy+'->' + stock+'->'+current_data[stock].name},
-    }
-    resp = requests.post(g.WEBHOOK_URL, json=params)
 
-def feishu(stock,buy):
-    if g.push==False:
-        return
-    current_data = get_current_data()
-    params = {
-        "timestamp": int(time.time()),
-        "sign": gen_sign(g.WEBHOOK_SECRET),
-        "msg_type": "text",
-        "content": {"text": '【首板】'+buy+'->' + stock+'->'+current_data[stock].name},
-    }
-    resp = requests.post(g.WEBHOOK_URL, json=params)
+    
 def gen_sign(secret):# 拼接时间戳以及签名校验
     timestamp = int(time.time())
 
@@ -460,4 +547,5 @@ def gen_sign(secret):# 拼接时间戳以及签名校验
     
 
 def filter_kcbj_stock(initial_list):
-    return [stock for stock in initial_list if stock[0] != '4'  and stock[0] != '8' and stock[:2] != '68' and stock[0] != '3']  #and stock[0] != '3'
+    # 排除北交所（4/8开头）和科创板（68开头），保留创业板（3开头）
+    return [stock for stock in initial_list if stock[0] != '4' and stock[0] != '8' and stock[:2] != '68']
