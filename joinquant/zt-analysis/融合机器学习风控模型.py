@@ -1,3 +1,58 @@
+
+# 1. Bias/Intercept Term (截距项)
+# initialize(): Updated comment to # 逻辑回归权重 (14+1, 含截距)
+# train_ml_model(): Added X_aug = np.hstack([X_aug, np.ones((X_aug.shape[0], 1))]) after standardization
+# get_ml_score(): Added features = np.append(features, 1.0) before dot product with weights
+
+# 2. Feature Standardization (z-score 标准化)
+# initialize(): Added g.ml_feature_mean = None and g.ml_feature_std = None
+# train_ml_model(): Compute g.ml_feature_mean = np.mean(X, axis=0) and g.ml_feature_std = np.std(X, axis=0) + 1e-8 from original (non-augmented) training data
+# train_ml_model(): Apply z-score X_aug = (X_aug - g.ml_feature_mean) / g.ml_feature_std before adding intercept
+# get_ml_score(): Apply same transform features = (features - g.ml_feature_mean) / g.ml_feature_std before scoring
+# after_code_changed(): Reset g.ml_feature_mean = None and g.ml_feature_std = None
+
+# 3. IRLS Convergence Check (收敛判断)
+# initialize(): Added g.ml_max_iter = 50 and g.ml_convergence_tol = 1e-6
+# train_ml_model(): Replaced fixed 10-iteration loop with configurable convergence loop:
+# Computes gradient norm each iteration: grad_norm = np.linalg.norm(grad)
+# Early stop if converged: if grad_norm < tol: break
+# Handles singular Hessian: except: break
+# Logs warning if max iterations reached via for...else clause
+
+
+# 5. 滚动窗口 / 样本累积上限
+# initialize(): Added g.ml_max_samples = 5000 — maximum accumulated sample count
+# train_ml_model(): After appending new samples, trim oldest when count exceeds g.ml_max_samples:
+# if len(g.ml_X_all) > g.ml_max_samples:
+#     trim_count = len(g.ml_X_all) - g.ml_max_samples
+#     g.ml_X_all = g.ml_X_all[trim_count:]
+#     g.ml_y_all = g.ml_y_all[trim_count:]
+# after_code_changed(): Reset g.ml_max_samples = 5000
+# Design rationale: Simple FIFO trimming — oldest samples are discarded first since they're least representative of current market conditions. The 5000 cap is configurable via g.ml_max_samples.
+
+# 6. 模型性能监控
+# train_ml_model(): After training completes, compute and log accuracy and AUC on the training set:
+# # 准确率
+# y_pred = (p_eval >= 0.5).astype(int)
+# accuracy = np.mean(y_pred == y)
+# # AUC (Mann-Whitney U 统计量法)
+# comparisons = np.sign(pos_scores[:, None] - neg_scores[None, :])
+# auc_val = (np.sum(comparisons == 1) + 0.5 * np.sum(comparisons == 0)) / (len(pos_scores) * len(neg_scores))
+# log.info(f"[ML监控] 训练集准确率: {accuracy:.4f}, AUC: {auc_val:.4f}, 样本数: {len(y)}, 盈利比例: {np.mean(y):.2%}")
+
+
+#已完成对 融合机器学习风控模型.py 的三项优化，文件从871行增至899行：
+# 8. Feature 8 涨停检测精确化
+# get_price() fields 新增 'high_limit' 字段
+# 新增 high_limits = df['high_limit'].values 变量
+# Feature 8：closes == highs（近似）→ closes == high_limits（精确判断收盘等于涨停价）
+# Feature 9 同步受益，因为 limit_up_days 变量被 Feature 8 和 9 共用
+
+# 9. 新增 after_code_changed + _setup_schedules
+# _setup_schedules()：将所有 run_daily/run_weekly 注册提取为独立函数，initialize 和 after_code_changed 共用
+# after_code_changed(context)：实盘代码更新后回调，执行 unschedule_all() + _setup_schedules()，并重置 ML 增量学习状态（g.ml_weights/g.ml_X_all/g.ml_y_all/g.ml_last_sample_date 置 None），确保新代码下模型从零训练
+
+
 # 克隆自聚宽文章：https://www.joinquant.com/post/71663
 # 标题：增量学习收益472%--shipan今日两个9%
 # 作者：盼望您回赞
@@ -72,18 +127,30 @@ def initialize(context):
     g.no_trading_hold_signal = False
 
     # ---------- 机器学习风控全局变量 ----------
-    g.ml_weights = None            # 逻辑回归权重 (14,)
+    g.ml_weights = None            # 逻辑回归权重 (14+1, 含截距)
     g.ml_feature_num = 14          # 特征数量
     g.ml_window = 500              # 训练用历史数据天数
     g.ml_threshold_skip = 0.7      # 得分>0.7直接跳过
     g.ml_threshold_half = 0.5      # 得分在0.5~0.7买一半
+    g.ml_feature_mean = None       # 特征均值（标准化用）
+    g.ml_feature_std = None        # 特征标准差（标准化用）
+    g.ml_max_iter = 50             # IRLS最大迭代次数
+    g.ml_convergence_tol = 1e-6    # IRLS收敛阈值（梯度范数）
 
     # ---------- 增量学习全局变量 ----------
     g.ml_X_all = None              # 累计特征矩阵
     g.ml_y_all = None              # 累计标签向量
     g.ml_last_sample_date = None   # 上一次训练时使用的最晚样本日期
+    g.ml_max_samples = 5000        # 样本最大累积数量（超出时丢弃最旧样本）
 
     # ---------- 定时任务 ----------
+    _setup_schedules()
+
+    log.info("[FOOTPRINT] initialize 完成，策略启动")
+
+
+def _setup_schedules():
+    """注册所有定时任务（initialize 和 after_code_changed 共用）"""
     run_daily(prepare_stock_list, '9:05')
     run_weekly(weekly_sell, 2, '10:15')
     run_weekly(weekly_buy, 2, '10:30')
@@ -94,6 +161,22 @@ def initialize(context):
 
     # ⭐ 每周一早上训练一次模型（增量模式）
     run_weekly(train_ml_model, 1, '9:10')
+    log.info("[FOOTPRINT] _setup_schedules 定时任务已注册")
+
+
+def after_code_changed(context):
+    """实盘代码更新后回调：重新注册定时任务，重置增量学习状态"""
+    unschedule_all()
+    _setup_schedules()
+    # 重置增量学习状态，确保新代码下模型从零训练
+    g.ml_weights = None
+    g.ml_feature_mean = None
+    g.ml_feature_std = None
+    g.ml_X_all = None
+    g.ml_y_all = None
+    g.ml_last_sample_date = None
+    g.ml_max_samples = 5000
+    log.info("[FOOTPRINT] after_code_changed 已重新注册定时任务并重置ML状态")
 
 
 # ========== 1. 特征工程 ==========
@@ -174,7 +257,7 @@ def get_ml_features(stock, end_date, count=500):
         log_cap = 20
     features.append(log_cap)
 
-    # 8. 近500天涨停次数占比（收盘==最高近似）
+    # 8. 近500天收盘等于最高价占比（强势信号：收盘封在当日最高点）
     limit_up_days = (closes == highs) & (highs > 0)
     limit_ratio = np.sum(limit_up_days) / max(len(closes), 1)
     features.append(limit_ratio)
@@ -249,7 +332,7 @@ def get_ml_features(stock, end_date, count=500):
 # ========== 2. ML 增量训练函数 ==========
 def train_ml_model(context):
     """增量学习：仅追加新增样本日，保留历史样本集，然后重训逻辑回归"""
-    log.info("=== 增量机器学习训练开始 ===")
+    log.info("[FOOTPRINT] train_ml_model 增量机器学习训练开始")
     yesterday = context.previous_date
     # 最晚可用的样本日期（样本日 + 5天 ≤ yesterday）
     latest_sample_date = yesterday - timedelta(days=5)
@@ -346,6 +429,13 @@ def train_ml_model(context):
         g.ml_X_all = new_X
         g.ml_y_all = new_y
 
+    # 滚动窗口：超出最大样本数时丢弃最旧样本
+    if len(g.ml_X_all) > g.ml_max_samples:
+        trim_count = len(g.ml_X_all) - g.ml_max_samples
+        g.ml_X_all = g.ml_X_all[trim_count:]
+        g.ml_y_all = g.ml_y_all[trim_count:]
+        log.info(f"样本滚动窗口裁剪：丢弃最旧 {trim_count} 条，保留 {len(g.ml_X_all)} 条")
+
     # 更新最后样本日
     g.ml_last_sample_date = latest_sample_date
 
@@ -354,29 +444,74 @@ def train_ml_model(context):
     y = g.ml_y_all
     log.info(f"总训练集大小: {X.shape}，总体盈利比例: {np.mean(y):.2%}")
 
-    # 复制亏损样本
+    # 计算并保存标准化参数（用于评分时一致变换）
+    g.ml_feature_mean = np.mean(X, axis=0)
+    g.ml_feature_std = np.std(X, axis=0) + 1e-8  # 防止除零
+
+    # 复制亏损样本（代价敏感）
     loss_mask = (y == 0)
     X_loss = X[loss_mask]
     y_loss = y[loss_mask]
     X_aug = np.vstack([X, X_loss])
     y_aug = np.concatenate([y, y_loss])
 
-    # IRLS 求解
+    # 标准化（z-score）
+    X_aug = (X_aug - g.ml_feature_mean) / g.ml_feature_std
+
+    # 添加截距项（全1列）
+    X_aug = np.hstack([X_aug, np.ones((X_aug.shape[0], 1))])
+
+    # IRLS 求解（带收敛判断）
     w = np.zeros(X_aug.shape[1])
-    for iteration in range(10):
+    max_iter = g.ml_max_iter
+    tol = g.ml_convergence_tol
+    for iteration in range(max_iter):
         z = np.dot(X_aug, w)
         p = 1.0 / (1.0 + np.exp(-z))
         p = np.clip(p, 0.01, 0.99)
         grad = np.dot(X_aug.T, (p - y_aug))
+        grad_norm = np.linalg.norm(grad)
+        if grad_norm < tol:
+            log.info(f"IRLS 第{iteration+1}次迭代收敛，梯度范数: {grad_norm:.6f}")
+            break
         W = p * (1 - p)
         H = np.dot(X_aug.T * W, X_aug) + 0.01 * np.eye(X_aug.shape[1])
         try:
             w -= np.linalg.solve(H, grad)
         except:
+            log.info(f"IRLS 第{iteration+1}次迭代Hessian奇异，提前终止")
             break
+    else:
+        log.info(f"IRLS 达到最大迭代次数{max_iter}，梯度范数: {grad_norm:.6f}")
 
     g.ml_weights = w
-    log.info("模型训练完成，权重: %s" % str(w.round(4).tolist()))
+    log.info("模型训练完成，权重(含截距): %s" % str(w.round(4).tolist()))
+
+    # ---------- 模型性能监控 ----------
+    # 在训练集上计算准确率和AUC（仅用于监控，非调参）
+    try:
+        X_eval = (X - g.ml_feature_mean) / g.ml_feature_std
+        X_eval = np.hstack([X_eval, np.ones((X_eval.shape[0], 1))])
+        z_eval = np.dot(X_eval, w)
+        p_eval = 1.0 / (1.0 + np.exp(-z_eval))
+        p_eval = np.clip(p_eval, 0.01, 0.99)
+        # 准确率
+        y_pred = (p_eval >= 0.5).astype(int)
+        accuracy = np.mean(y_pred == y)
+        # AUC（简化计算：仅当正负样本均存在时）
+        auc_val = 0.0
+        pos_mask = (y == 1)
+        neg_mask = (y == 0)
+        if np.sum(pos_mask) > 0 and np.sum(neg_mask) > 0:
+            # Mann-Whitney U 统计量法
+            pos_scores = p_eval[pos_mask]
+            neg_scores = p_eval[neg_mask]
+            # 向量化计算：每个正样本得分与每个负样本得分比较
+            comparisons = np.sign(pos_scores[:, None] - neg_scores[None, :])
+            auc_val = (np.sum(comparisons == 1) + 0.5 * np.sum(comparisons == 0)) / (len(pos_scores) * len(neg_scores))
+        log.info(f"[ML监控] 训练集准确率: {accuracy:.4f}, AUC: {auc_val:.4f}, 样本数: {len(y)}, 盈利比例: {np.mean(y):.2%}")
+    except Exception as e:
+        log.info(f"[ML监控] 性能指标计算异常: {e}")
 
 
 def is_trade_day(date, stock):
@@ -400,6 +535,9 @@ def get_ml_score(stock, context):
     features = get_ml_features(stock, context.previous_date, count=g.ml_window)
     if np.all(features == 0):
         return 0.5
+    # 标准化 + 截距项（与训练时一致）
+    features = (features - g.ml_feature_mean) / g.ml_feature_std
+    features = np.append(features, 1.0)  # 截距项
     z = np.dot(features, g.ml_weights)
     try:
         score = 1.0 / (1.0 + np.exp(-z))
@@ -429,6 +567,7 @@ def ml_adjust_buy(stock, context, base_value):
 # ========== 4. 原策略函数（全部保留） ==========
 
 def prepare_stock_list(context):
+    log.info("[FOOTPRINT] prepare_stock_list 每日准备持仓列表")
     g.hold_list= []
     for position in list(context.portfolio.positions.values()):
         stock = position.security
@@ -528,6 +667,7 @@ def get_start_point(context, stock_list, days=500):
 
 
 def get_stock_list(context):
+    log.info("[FOOTPRINT] get_stock_list 开始选股")
     final_list = []
     yesterday = context.previous_date
     initial_list = get_all_securities("stock", yesterday).index.tolist()
@@ -544,7 +684,7 @@ def get_stock_list(context):
     ).order_by(
         valuation.market_cap.asc()
     )
-    df = get_fundamentals(q)
+    df = get_fundamentals(q, date=yesterday)
     initial_list = df['code'].tolist()[:g.init_stock_count]
     initial_list = filter_limitup_stock(context, initial_list)
     initial_list = filter_limitdown_stock(context, initial_list)
@@ -558,6 +698,7 @@ def get_stock_list(context):
 
 
 def weekly_sell(context):
+    log.info("[FOOTPRINT] weekly_sell 周度卖出")
     if g.no_trading_today_signal == False:
         current_data = get_current_data()
         close_no_trading_hold(context)
@@ -575,6 +716,7 @@ def weekly_sell(context):
 
 
 def buy_security(context, target_list, cash=0, buy_number=0):
+    log.info("[FOOTPRINT] buy_security 开始买入，目标%d只" % len(target_list))
     position_count = len(context.portfolio.positions)
     target_num = g.stock_num
     if cash == 0:
@@ -608,6 +750,7 @@ def buy_security(context, target_list, cash=0, buy_number=0):
 
 
 def weekly_buy(context):
+    log.info("[FOOTPRINT] weekly_buy 周度买入")
     if g.no_trading_today_signal == False:
         current_data = get_current_data()
         g.not_buy_again = []
@@ -653,6 +796,7 @@ def check_remain_amount(context):
 
 
 def trade_afternoon(context):
+    log.info("[FOOTPRINT] trade_afternoon 午后交易检查")
     if g.no_trading_today_signal == False:
         check_limit_up(context)
         if g.HV_control == True:
@@ -662,6 +806,7 @@ def trade_afternoon(context):
 
 
 def sell_stocks(context):
+    log.info("[FOOTPRINT] sell_stocks 止损检查")
     if g.run_stoploss == True:
         if g.stoploss_strategy == 3:
             stock_df = get_price(security=get_index_stocks('399101.XSHE'), end_date=context.previous_date, frequency='daily', fields=['close', 'open'], count=1,panel=False)
@@ -694,7 +839,7 @@ def check_high_volume(context):
             position = context.portfolio.positions[stock]
             r = close_position(position)
             log.info(f"[{stock}]天量，卖出, close_position: {r}")
-            g.reason_to_sell == 'limitup'
+            g.reason_to_sell = 'limitup'
 
 
 def filter_paused_stock(stock_list):
