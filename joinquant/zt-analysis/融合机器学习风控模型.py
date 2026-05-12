@@ -127,21 +127,16 @@ def initialize(context):
     g.no_trading_hold_signal = False
 
     # ---------- 机器学习风控全局变量 ----------
-    g.ml_weights = None            # 逻辑回归权重 (14+1, 含截距)
+    g.ml_weights = None            # 逻辑回归权重 (14,)
     g.ml_feature_num = 14          # 特征数量
     g.ml_window = 500              # 训练用历史数据天数
     g.ml_threshold_skip = 0.7      # 得分>0.7直接跳过
     g.ml_threshold_half = 0.5      # 得分在0.5~0.7买一半
-    g.ml_feature_mean = None       # 特征均值（标准化用）
-    g.ml_feature_std = None        # 特征标准差（标准化用）
-    g.ml_max_iter = 50             # IRLS最大迭代次数
-    g.ml_convergence_tol = 1e-6    # IRLS收敛阈值（梯度范数）
 
     # ---------- 增量学习全局变量 ----------
     g.ml_X_all = None              # 累计特征矩阵
     g.ml_y_all = None              # 累计标签向量
     g.ml_last_sample_date = None   # 上一次训练时使用的最晚样本日期
-    g.ml_max_samples = 5000        # 样本最大累积数量（超出时丢弃最旧样本）
 
     # ---------- 定时任务 ----------
     _setup_schedules()
@@ -170,12 +165,9 @@ def after_code_changed(context):
     _setup_schedules()
     # 重置增量学习状态，确保新代码下模型从零训练
     g.ml_weights = None
-    g.ml_feature_mean = None
-    g.ml_feature_std = None
     g.ml_X_all = None
     g.ml_y_all = None
     g.ml_last_sample_date = None
-    g.ml_max_samples = 5000
     log.info("[FOOTPRINT] after_code_changed 已重新注册定时任务并重置ML状态")
 
 
@@ -429,13 +421,6 @@ def train_ml_model(context):
         g.ml_X_all = new_X
         g.ml_y_all = new_y
 
-    # 滚动窗口：超出最大样本数时丢弃最旧样本
-    if len(g.ml_X_all) > g.ml_max_samples:
-        trim_count = len(g.ml_X_all) - g.ml_max_samples
-        g.ml_X_all = g.ml_X_all[trim_count:]
-        g.ml_y_all = g.ml_y_all[trim_count:]
-        log.info(f"样本滚动窗口裁剪：丢弃最旧 {trim_count} 条，保留 {len(g.ml_X_all)} 条")
-
     # 更新最后样本日
     g.ml_last_sample_date = latest_sample_date
 
@@ -444,10 +429,6 @@ def train_ml_model(context):
     y = g.ml_y_all
     log.info(f"总训练集大小: {X.shape}，总体盈利比例: {np.mean(y):.2%}")
 
-    # 计算并保存标准化参数（用于评分时一致变换）
-    g.ml_feature_mean = np.mean(X, axis=0)
-    g.ml_feature_std = np.std(X, axis=0) + 1e-8  # 防止除零
-
     # 复制亏损样本（代价敏感）
     loss_mask = (y == 0)
     X_loss = X[loss_mask]
@@ -455,44 +436,27 @@ def train_ml_model(context):
     X_aug = np.vstack([X, X_loss])
     y_aug = np.concatenate([y, y_loss])
 
-    # 标准化（z-score）
-    X_aug = (X_aug - g.ml_feature_mean) / g.ml_feature_std
-
-    # 添加截距项（全1列）
-    X_aug = np.hstack([X_aug, np.ones((X_aug.shape[0], 1))])
-
-    # IRLS 求解（带收敛判断）
+    # IRLS 求解（10次固定迭代，隐式正则化：早停防止过拟合）
     w = np.zeros(X_aug.shape[1])
-    max_iter = g.ml_max_iter
-    tol = g.ml_convergence_tol
-    for iteration in range(max_iter):
+    for iteration in range(10):
         z = np.dot(X_aug, w)
         p = 1.0 / (1.0 + np.exp(-z))
         p = np.clip(p, 0.01, 0.99)
-        grad = np.dot(X_aug.T, (p - y_aug))
-        grad_norm = np.linalg.norm(grad)
-        if grad_norm < tol:
-            log.info(f"IRLS 第{iteration+1}次迭代收敛，梯度范数: {grad_norm:.6f}")
-            break
         W = p * (1 - p)
         H = np.dot(X_aug.T * W, X_aug) + 0.01 * np.eye(X_aug.shape[1])
+        grad = np.dot(X_aug.T, (p - y_aug))
         try:
             w -= np.linalg.solve(H, grad)
         except:
-            log.info(f"IRLS 第{iteration+1}次迭代Hessian奇异，提前终止")
             break
-    else:
-        log.info(f"IRLS 达到最大迭代次数{max_iter}，梯度范数: {grad_norm:.6f}")
 
     g.ml_weights = w
-    log.info("模型训练完成，权重(含截距): %s" % str(w.round(4).tolist()))
+    log.info("模型训练完成，权重: %s" % str(w.round(4).tolist()))
 
     # ---------- 模型性能监控 ----------
     # 在训练集上计算准确率和AUC（仅用于监控，非调参）
     try:
-        X_eval = (X - g.ml_feature_mean) / g.ml_feature_std
-        X_eval = np.hstack([X_eval, np.ones((X_eval.shape[0], 1))])
-        z_eval = np.dot(X_eval, w)
+        z_eval = np.dot(X, w)
         p_eval = 1.0 / (1.0 + np.exp(-z_eval))
         p_eval = np.clip(p_eval, 0.01, 0.99)
         # 准确率
@@ -535,9 +499,6 @@ def get_ml_score(stock, context):
     features = get_ml_features(stock, context.previous_date, count=g.ml_window)
     if np.all(features == 0):
         return 0.5
-    # 标准化 + 截距项（与训练时一致）
-    features = (features - g.ml_feature_mean) / g.ml_feature_std
-    features = np.append(features, 1.0)  # 截距项
     z = np.dot(features, g.ml_weights)
     try:
         score = 1.0 / (1.0 + np.exp(-z))
