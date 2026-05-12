@@ -23,7 +23,7 @@ from datetime import timedelta
 import newqmt_sql
 
 # ⭐ 在这里设置这个策略的分类标签（写入 trade.fenlei）
-newqmt_sql.FENLEI = 'eagles-5-75-2000'      
+newqmt_sql.FENLEI = 'eagles-75-300-3000-test'      
 
 from newqmt_sql import (
     order_zzy as order,
@@ -39,7 +39,6 @@ CONFIG = {
     # ------ 全局参数 ------
     'global': {
         'max_stock_num': 3,           # 最大持仓数量
-        'fenlei': 'eagles-0',         # 策略分类标签（写入 trade.fenlei）
         'min_shares': 100,            # 最小买入股数
         'cash_ratio_min': 0.3,        # 最低现金比例要求（低于此值不买入）
     },
@@ -52,6 +51,7 @@ CONFIG = {
         'sell_am': '11:25',              # 上午收盘前止盈
         'sell_pm': '13:15',              # 下午收盘前止盈/止损
         'log_position_stats': '14:55',   # 每日持仓统计
+        'log_position_mid_stats': '11:25',   # 午时持仓统计
     },
 
     # ------ 一进二策略参数 (gap_up) ------
@@ -83,8 +83,8 @@ CONFIG = {
         'avg_price_increase_min': -0.04,    # 均价增长最低要求
         'money_min': 3e8,                   # 最低成交金额
         'money_max': 19e8,                  # 最高成交金额
-        'market_cap_min': 75,               # 最低总市值（亿）
-        'circulating_market_cap_max': 2000,  # 最高流通市值（亿）
+        'market_cap_min': 300,               # 最低总市值（亿）
+        'circulating_market_cap_max': 3000,  # 最高流通市值（亿）
         'auction_vol_ratio_min': 0.03,      # 集合竞价成交量/昨日成交量 最低比例
         'current_ratio_min': 0.98,          # 开盘价/昨日涨停价 下限
         'current_ratio_max': 1.09,          # 开盘价/昨日涨停价 上限
@@ -172,10 +172,6 @@ CONFIG = {
     },
 }
 
-# ⭐ 设置策略分类标签
-#newqmt_sql.FENLEI = CONFIG['global']['fenlei']
-
-
 # ================================================
 # 策略初始化
 # ================================================
@@ -186,12 +182,7 @@ def initialize(context):
     set_option('avoid_future_data', True)  # 避免使用未来数据
 
     # 设置定时任务（时间从CONFIG读取）
-    run_daily(get_stock_list, CONFIG['schedule']['get_stock_list'])
-    run_daily(buy, CONFIG['schedule']['buy'])
-    run_daily(sell_heavy_turnover, time=CONFIG['schedule']['sell_heavy_turnover'])
-    run_daily(sell_am, time=CONFIG['schedule']['sell_am'])
-    run_daily(sell_pm, time=CONFIG['schedule']['sell_pm'])
-    run_daily(log_position_stats, time=CONFIG['schedule']['log_position_stats'])
+    _setup_schedules()
 
     # 风险控制追踪变量
     g.trailing_high = {}            # {stock: highest_price_since_purchase} 移动止盈最高价
@@ -207,6 +198,32 @@ def initialize(context):
 
     # 记录CONFIG配置
     _log_config()
+
+
+# ================================================
+# 定时任务注册
+# ================================================
+def _setup_schedules():
+    """注册所有定时任务（供 initialize 和 after_code_changed 调用）"""
+    run_daily(get_stock_list, CONFIG['schedule']['get_stock_list'])
+    run_daily(buy, CONFIG['schedule']['buy'])
+    run_daily(sell_heavy_turnover, time=CONFIG['schedule']['sell_heavy_turnover'])
+    run_daily(sell_am, time=CONFIG['schedule']['sell_am'])
+    run_daily(sell_pm, time=CONFIG['schedule']['sell_pm'])
+    run_daily(log_position_stats, time=CONFIG['schedule']['log_position_stats'])
+    run_daily(log_position_mid_stats, time=CONFIG['schedule']['log_position_mid_stats'])
+    log.info(f"[FOOTPRINT] _setup_schedules 已注册 {len(CONFIG['schedule'])} 个定时任务")
+
+
+# ================================================
+# 代码修改后处理
+# ================================================
+def after_code_changed(context):
+    """策略代码修改后触发：取消所有定时任务并重新注册，确保schedule与最新代码一致"""
+    log.info("[FOOTPRINT] after_code_changed 触发，重新注册定时任务")
+    unschedule_all()
+    _setup_schedules()
+    log.info("[FOOTPRINT] after_code_changed 完成")
 
 
 # ================================================
@@ -452,6 +469,7 @@ def _check_sector_concentration(qualified_stocks, context):
 # 选股函数
 # ================================================
 def get_stock_list(context):
+    log.info(f"[FOOTPRINT] get_stock_list 触发 @ {CONFIG['schedule']['get_stock_list']} | 日期={context.previous_date}")
 
     # 记录每日起始组合价值（用于日亏损计算）
     g.day_start_value = context.portfolio.total_value
@@ -461,6 +479,7 @@ def get_stock_list(context):
     current_value = context.portfolio.total_value
     g.portfolio_peak = max(g.portfolio_peak, current_value)
     g.equity_history.append(current_value)
+    log.info(f"[FOOTPRINT] get_stock_list | 总资产={current_value:.0f}, 峰值={g.portfolio_peak:.0f}")
 
     # 检查市场环境
     _check_market_regime(context)
@@ -471,11 +490,13 @@ def get_stock_list(context):
 
     # 获取初始股票池
     initial_list = prepare_stock_list(date)
+    log.info(f"[FOOTPRINT] get_stock_list | 初始股票池={len(initial_list)}只")
 
     # 获取不同日期的涨停股票列表
     hl0_list = get_hl_stock(initial_list, date)       # 昨日涨停股票
     hl1_list = get_ever_hl_stock(initial_list, date_1)  # 前日曾涨停股票
     hl2_list = get_ever_hl_stock(initial_list, date_2)  # 前前日曾涨停股票
+    log.info(f"[FOOTPRINT] get_stock_list | 昨日涨停={len(hl0_list)}, 前日曾涨停={len(hl1_list)}, 前前日曾涨停={len(hl2_list)}")
 
     # 一进二策略：昨日涨停且前两日未涨停的股票
     elements_to_remove = set(hl1_list + hl2_list)  # 合并前两日涨停股票，用于快速查找
@@ -488,6 +509,8 @@ def get_stock_list(context):
     h1_list = get_ever_hl_stock2(initial_list, date)  # 昨日曾涨停但收盘未涨停的股票
     elements_to_remove = get_hl_stock(initial_list, date_1)  # 前日涨停的股票
     g.reversal = [stock for stock in h1_list if stock not in elements_to_remove]  # 昨日曾涨停但收盘未涨停，且前日未涨停
+
+    log.info(f"[FOOTPRINT] get_stock_list 完成 | 一进二={len(g.gap_up)}, 首板低开={len(g.gap_down)}, 弱转强={len(g.reversal)}")
 
 
 def check_position_limit(context):
@@ -508,6 +531,8 @@ def check_position_limit(context):
 # 买入函数
 # ================================================
 def buy(context):
+    log.info(f"[FOOTPRINT] buy 触发 @ {CONFIG['schedule']['buy']} | 持仓={len(context.portfolio.positions)}只, 可用资金={context.portfolio.available_cash:.0f}")
+
     check_position_limit(context)
 
     rc = CONFIG['risk_control']
@@ -571,6 +596,7 @@ def buy(context):
         gk_stocks.append(s)
         qualified_stocks.append(s)
 
+    log.info(f"[FOOTPRINT] buy | 一进二筛选: 候选={len(g.gap_up)}, 通过={len(gk_stocks)}")
 
     date = transform_date(context.previous_date, 'str')
 
@@ -599,6 +625,7 @@ def buy(context):
                 dk_stocks.append(s)
                 qualified_stocks.append(s)
 
+    log.info(f"[FOOTPRINT] buy | 首板低开筛选: 候选={len(g.gap_down)}, 通过={len(dk_stocks)}")
 
     # ====== 弱转强策略 (reversal) ======
     rv = CONFIG['reversal']
@@ -648,6 +675,8 @@ def buy(context):
         # 如果股票满足所有条件，则添加到列表中
         rzq_stocks.append(s)
         qualified_stocks.append(s)
+
+    log.info(f"[FOOTPRINT] buy | 弱转强筛选: 候选={len(g.reversal)}, 通过={len(rzq_stocks)}")
 
     # ====== 构建股票→策略类型映射 ======
     stock_strategy_map = {}
@@ -714,6 +743,8 @@ def buy(context):
                 g.stock_strategy[s] = stock_strategy_map.get(s, '未知')
 
         log.info(f"买入 {len(qualified_stocks)} 只股票，当前持仓 {current_position_count + len(qualified_stocks)} 只")
+
+    log.info(f"[FOOTPRINT] buy 完成 | 合格={len(qualified_stocks)}只, 买入后持仓={len(context.portfolio.positions)}只")
 
 
 # ================================================
@@ -939,6 +970,7 @@ def get_index_increase_ratio(index_code, context):
 # ================================================
 def sell_heavy_turnover(context):
     """高位放量卖出：处于高位、成交量放大、收盘位置低、价格下跌时卖出"""
+    log.info(f"[FOOTPRINT] sell_heavy_turnover 触发 @ {CONFIG['schedule']['sell_heavy_turnover']} | 持仓={len(context.portfolio.positions)}只")
     sl = CONFIG['sell']
     date = transform_date(context.previous_date, 'str')
     current_data = get_current_data()
@@ -965,6 +997,7 @@ def sell_heavy_turnover(context):
 
 def sell_am(context):
     """上午止盈：未涨停且有盈利时卖出；分批止盈：盈利达到目标时先卖出一部分"""
+    log.info(f"[FOOTPRINT] sell_am 触发 @ {CONFIG['schedule']['sell_am']} | 持仓={len(context.portfolio.positions)}只")
     sl = CONFIG['sell']
     rc = CONFIG['risk_control']
     date = transform_date(context.previous_date, 'str')
@@ -1005,6 +1038,7 @@ def sell_am(context):
 
 def sell_pm(context):
     """下午止盈/止损：常规止盈 + MA止损 + 移动止盈 + 时间止损 + 日亏损减仓"""
+    log.info(f"[FOOTPRINT] sell_pm 触发 @ {CONFIG['schedule']['sell_pm']} | 持仓={len(context.portfolio.positions)}只")
     sl = CONFIG['sell']
     rc = CONFIG['risk_control']
     date = transform_date(context.previous_date, 'str')
@@ -1078,12 +1112,7 @@ def sell_pm(context):
                 log.info(f"时间止损: {s} 持仓{holding_days}天, 盈利{profit_ratio:.2%}")
                 continue
 
-
-# ================================================
-# 每日持仓统计
-# ================================================
-def log_position_stats(context):
-    """每日持仓统计：每股盈利、总体盈利、策略类型、各策略盈利占比"""
+def _log_position_stats(context):
     current_data = get_current_data()
     positions = context.portfolio.positions
 
@@ -1128,6 +1157,19 @@ def log_position_stats(context):
 
     log.info("=" * 60)
 
+    
+# ================================================
+# 每日持仓统计
+# ================================================
+def log_position_stats(context):
+    """每日持仓统计：每股盈利、总体盈利、策略类型、各策略盈利占比"""
+    log.info(f"[FOOTPRINT] log_position_stats 触发")
+    _log_position_stats(context)
+    
+def log_position_mid_stats(context):
+    """每日持仓统计：每股盈利、总体盈利、策略类型、各策略盈利占比"""
+    log.info(f"[FOOTPRINT] log_position_mid_stats 触发")
+    _log_position_stats(context)
 
 # ================================================
 # 首板低开策略辅助函数
