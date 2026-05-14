@@ -1,3 +1,5 @@
+# 已修复 4 处 history() 未来函数问题（均添加 end_date=context.previous_date）：
+
 # 克隆自聚宽文章：https://www.joinquant.com/post/71968
 # 标题：四合一：三马+小市值+七星高照+白马优化
 # 作者：金全人生
@@ -159,6 +161,49 @@ def initialize(context):
     set_params(context)
     set_strategy_params(context)
     log.set_level("order", "error")
+    _setup_schedules()
+
+
+def _setup_schedules():
+    """集中注册所有定时任务，供 initialize() 和 after_code_changed() 调用"""
+    # 策略1 小市值策略
+    if g.portfolio_value_proportion[0] > 0:
+        run_daily(prepare_small_cap_strategy, "9:05")
+        if g.DBL_control:
+            run_daily(check_macd_divergence, "9:31")
+        run_weekly(strategy_1_sell, 2, "09:40")
+        run_weekly(strategy_1_buy, 2, "09:45")
+        run_daily(sell_small_cap_stocks, time="10:00")
+        # ATR止损价日常更新
+        if g.enable_atr_stop_loss:
+            run_daily(update_atr_stop_prices, "10:30")
+            run_daily(update_atr_stop_prices, "14:00")
+        if g.huanshou_check:
+            run_daily(check_small_cap_turnover, "10:30")
+        run_daily(check_small_cap_limit_up, "14:00")
+        if g.check_defense:
+            run_daily(check_defense_trigger, "14:50")
+        run_daily(close_account, "14:50")
+
+    # 策略2 ETF反弹策略
+    if g.strategy_ETF_2000_proportion > 0:
+        run_daily(capital_balance_2, "14:45")
+        run_daily(strategy_2_sell, "14:49")
+        run_daily(strategy_2_buy, "14:50")
+
+    # 策略3 ETF轮动策略
+    if g.portfolio_value_proportion[2] > 0:
+        run_daily(check_atr_stop_loss_15, time='10:31')
+        run_daily(strategy_3_sell, time='14:00')
+        run_daily(strategy_3_buy, time='14:01')
+
+    # 策略4 白马策略
+    if g.portfolio_value_proportion[3] > 0:
+        run_monthly(prepare_blue_chip_before_open, 1, time="9:30")
+        run_monthly(adjust_blue_chip_position, 1, time="10:40")
+
+    run_daily(make_record, "15:01")
+    run_daily(print_summary, "15:02")
 
 
 # 基础参数设置
@@ -510,7 +555,7 @@ def get_small_cap_stocks_v2(context):
     if df.empty:
         return []
     final_list = list(df.code)
-    last_prices = history(1, "1d", "close", final_list, df=False)
+    last_prices = history(1, "1d", "close", final_list, df=False, end_date=context.previous_date)
     # 价格过滤
     return [
         stock
@@ -765,7 +810,7 @@ def get_small_cap_stocks_v3(context):
     if not final_list:
         return [g.xsz_buy_etf]
         
-    last_prices = history(1, unit="1d", field="close", security_list=final_list)
+    last_prices = history(1, unit="1d", field="close", security_list=final_list, end_date=context.previous_date)
     return [s for s in final_list if s in g.strategy_holdings[1] or last_prices[s][-1] <= 50][: g.xsz_stock_num]
 
 
@@ -887,6 +932,7 @@ def mini_consistency_check(context, signal):
 
 # 小市值早盘变量预处理
 def prepare_small_cap_strategy(context):
+    log.info(f"[FOOTPRINT] prepare_small_cap_strategy date={context.current_dt.date()}")
     # 根据配置决定是否在1、4月份避免交易
     if g.avoid_trade_april:
         g.trading_signal = False if context.current_dt.month in [1, 4] else True
@@ -1083,6 +1129,7 @@ def check_atr_stop_loss(context):
 
 # 小市值卖出
 def strategy_1_sell(context):
+    log.info(f"[FOOTPRINT] strategy_1_sell date={context.current_dt.date()}")
     log.info("=" * 100)
     log.info(f"[策略1] 日期: {context.current_dt.date()}")
     g.target_list = []
@@ -1171,6 +1218,7 @@ def strategy_1_sell(context):
 
 
 def strategy_1_buy(context):
+    log.info(f"[FOOTPRINT] strategy_1_buy date={context.current_dt.date()}")
     # 一致性风控检查（新增）：如果触发清仓信号，则不买入
     if g.enable_consistency_control and g.consistency_signal:
         log.warn("[策略1] 一致性风控触发清仓信号，暂停买入")
@@ -1257,6 +1305,7 @@ def check_small_cap_limit_up(context):
 
 # 止盈止损
 def sell_small_cap_stocks(context):
+    log.info(f"[FOOTPRINT] sell_small_cap_stocks date={context.current_dt.date()}")
     if g.run_stoploss:
         current_positions = context.portfolio.positions
 
@@ -1392,6 +1441,7 @@ def trade_zz2000_etf(context):
 
 
 def strategy_2_sell(context):
+    log.info(f"[FOOTPRINT] strategy_2_sell date={context.current_dt.date()}")
     cur_date = str(context.current_dt.date())
     if cur_date <= "2023-10-01":
         return
@@ -1455,6 +1505,7 @@ def strategy_2_sell(context):
 
 
 def strategy_2_buy(context):
+    log.info(f"[FOOTPRINT] strategy_2_buy date={context.current_dt.date()}")
     cur_date = str(context.current_dt.date())
     if cur_date <= "2023-10-01":
         return
@@ -1659,6 +1710,7 @@ def get_annualized_returns_16(price_series, days):
 
 # 修改 strategy_3_sell
 def strategy_3_sell(context):
+    log.info(f"[FOOTPRINT] strategy_3_sell date={context.current_dt.date()}")
     # 调用统一函数获取目标，此时目标里已经排除了高溢价ETF
     target_etfs = get_target_etfs_16(context) 
     target_set = set(target_etfs)
@@ -1732,6 +1784,7 @@ def smart_order_target_value_16(security, target_value, context):
 	
 	
 def strategy_3_buy(context):
+    log.info(f"[FOOTPRINT] strategy_3_buy date={context.current_dt.date()}")
     # 调用统一函数获取目标
     target_etfs = get_target_etfs_16(context)
 
@@ -1789,6 +1842,7 @@ def get_target_etfs_16(context):
 
 
 def adjust_blue_chip_position(context):
+    log.info(f"[FOOTPRINT] adjust_blue_chip_position date={context.current_dt.date()}")
     if not g.check_out_lists:
         prepare_blue_chip_before_open(context)
     buy_stocks = g.check_out_lists
@@ -1867,6 +1921,7 @@ def calculate_market_temperature(context):
 
 # 开盘前运行函数
 def prepare_blue_chip_before_open(context):
+    log.info(f"[FOOTPRINT] prepare_blue_chip_before_open date={context.current_dt.date()}")
     calculate_market_temperature(context)
     g.check_out_lists = []
     current_data = get_current_data()
@@ -1899,7 +1954,7 @@ def prepare_blue_chip_before_open(context):
             or (stock.startswith("4"))
         )
     ]
-    last_prices = history(1, unit="1d", field="close", security_list=all_stocks)
+    last_prices = history(1, unit="1d", field="close", security_list=all_stocks, end_date=context.previous_date)
     all_stocks = [
         stock for stock in all_stocks if last_prices[stock][-1] <= 100
     ]  # 过滤高价股
@@ -2650,6 +2705,7 @@ def bonus_filter(context, stock_list):
                 df=True,
                 skip_paused=False,
                 fq=None,
+                end_date=context.previous_date,
             )
             price_df = price_df.T
             price_df.rename(columns={price_df.columns[0]: "Close_now"}, inplace=True)
@@ -2891,6 +2947,7 @@ def huanshou(context, stock_list):
 
 # 成交量宽度防御检测
 def check_defense_trigger(context):
+    log.info(f"[FOOTPRINT] check_defense_trigger date={context.current_dt.date()}")
     """改进后的防御条件检查"""
 
     # 计算宽度
@@ -3172,45 +3229,10 @@ def short_by_market_cap(context, stock_list):
 
 
 def after_code_changed(context):
+    """实盘代码热更新回调：清除旧调度并重新注册"""
+    log.info(f"[FOOTPRINT] after_code_changed date={context.current_dt.date()}")
     unschedule_all()
-
-    if g.portfolio_value_proportion[0] > 0:
-        run_daily(prepare_small_cap_strategy, "9:05")
-        if g.check_defense and g.defense_signal is None:
-            check_defense_trigger(context)
-        if g.DBL_control:
-            run_daily(check_macd_divergence, "9:31")
-        run_weekly(strategy_1_sell, 2, "09:40")
-        run_weekly(strategy_1_buy, 2, "09:45")
-        run_daily(sell_small_cap_stocks, time="10:00")
-        # ATR止损价日常更新
-        if g.enable_atr_stop_loss:
-            run_daily(update_atr_stop_prices, "10:30")
-            run_daily(update_atr_stop_prices, "14:00")
-        if g.huanshou_check:
-            run_daily(check_small_cap_turnover, "10:30")
-        run_daily(check_small_cap_limit_up, "14:00")
-        if g.check_defense:
-            run_daily(check_defense_trigger, "14:50")
-        run_daily(close_account, "14:50")
-
-    # 策略2 ETF反弹策略
-    if g.strategy_ETF_2000_proportion > 0:
-        run_daily(capital_balance_2, "14:45")
-        run_daily(strategy_2_sell, "14:49")
-        run_daily(strategy_2_buy, "14:50")
-
-    # 策略3 ETF轮动策略
-    if g.portfolio_value_proportion[2] > 0:
-        run_daily(check_atr_stop_loss_15, time='10:31')
-        run_daily(strategy_3_sell, time='14:00')
-        run_daily(strategy_3_buy, time='14:01')
-    
-
-    # 策略4 白马策略
-    if g.portfolio_value_proportion[3] > 0:
-        run_monthly(prepare_blue_chip_before_open, 1, time="9:30")
-        run_monthly(adjust_blue_chip_position, 1, time="10:40")
-
-    run_daily(make_record, "15:01")
-    run_daily(print_summary, "15:02")
+    _setup_schedules()
+    # 立即执行防御检测（非定时任务，原逻辑保留）
+    if g.portfolio_value_proportion[0] > 0 and g.check_defense and g.defense_signal is None:
+        check_defense_trigger(context)
